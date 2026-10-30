@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import io
+import math
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -11,6 +12,8 @@ from PIL import Image, ImageOps
 pillow_heif.register_heif_opener()
 
 GPS_IFD = 0x8825
+FORMATS = ("JPEG", "PNG", "HEIF")  # JPEG also opens iPhone/DJI MPO files
+MAX_PIXELS = 64_000_000  # 48-64 MP phone photos; refuses decompression bombs long before Pillow's 179 MP error
 
 
 def to_data_url(image: Image.Image, quality: int = 90) -> str:
@@ -56,17 +59,26 @@ def gps_from_ifd(gps: dict) -> tuple[float, float] | None:
         lat = -lat
     if gps.get(3) == "W":
         lon = -lon
+    if not (math.isfinite(lat) and math.isfinite(lon)) or abs(lat) > 90 or abs(lon) > 180 or lat == lon == 0:
+        return None  # 0/0 rationals read as NaN; (0, 0) is a phone with no fix
     return (round(lat, 6), round(lon, 6))
 
 
 def load_image(index: int, data: bytes, full_max_px: int = 2048, work_max_px: int = 1024) -> StopImage:
-    image = Image.open(io.BytesIO(data))
+    """Raises (OSError, ValueError, or Pillow's DecompressionBombError) for bytes that aren't a usable photo."""
+    image = Image.open(io.BytesIO(data), formats=FORMATS)
+    if image.width * image.height > MAX_PIXELS:
+        raise ValueError(f"image is {image.width}x{image.height}; too many pixels")
     gps = gps_from_ifd(dict(image.getexif().get_ifd(GPS_IFD)))
-    image = ImageOps.exif_transpose(image).convert("RGB")
+    image.draft("RGB", (full_max_px, full_max_px))  # JPEG: decode big photos at 1/2 or 1/4 scale; no-op otherwise
+    ImageOps.exif_transpose(image, in_place=True)  # pillow-heif already rotated HEIC and reset its Orientation tag
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    full = _shrink(image, full_max_px)
     return StopImage(
         index=index,
         hash=hashlib.sha256(data).hexdigest()[:16],
-        full=_shrink(image, full_max_px),
-        work=_shrink(image, work_max_px),
+        full=full,
+        work=_shrink(full, work_max_px),
         gps=gps,
     )
