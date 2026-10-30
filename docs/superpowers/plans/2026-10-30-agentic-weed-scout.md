@@ -421,15 +421,25 @@ git commit -m "feat: add shared data models"
 
 `tests/test_retry.py`:
 ```python
+import httpx
+import openai
 import pytest
 
 from scout.retry import BadRequest, with_retry
+
+_REQUEST = httpx.Request("POST", "https://api.meta.ai/v1/responses")
 
 
 class StatusError(Exception):
     def __init__(self, status_code):
         super().__init__(f"status {status_code}")
         self.status_code = status_code
+
+
+def _raiser(error):
+    def fn():
+        raise error
+    return fn
 
 
 def test_retries_transient_then_succeeds():
@@ -445,12 +455,13 @@ def test_retries_transient_then_succeeds():
     assert sleeps == [1, 2]
 
 
-def test_bad_request_is_not_retried():
+@pytest.mark.parametrize("status", [400, 413, 422])
+def test_rejected_request_is_not_retried(status):
     calls = []
 
     def fn():
         calls.append(1)
-        raise StatusError(400)
+        raise StatusError(status)
 
     with pytest.raises(BadRequest):
         with_retry(fn, sleep=lambda s: None)
@@ -474,6 +485,26 @@ def test_gives_up_after_retries():
     with pytest.raises(StatusError):
         with_retry(fn, retries=2, sleep=sleeps.append)
     assert sleeps == [1, 2]
+
+
+def test_sdk_connection_error_is_retried():
+    sleeps = []
+    with pytest.raises(openai.APIConnectionError):
+        with_retry(_raiser(openai.APIConnectionError(request=_REQUEST)), retries=1, sleep=sleeps.append)
+    assert sleeps == [1]
+
+
+def test_sdk_timeout_is_not_retried():
+    sleeps = []
+    with pytest.raises(openai.APITimeoutError):
+        with_retry(_raiser(openai.APITimeoutError(request=_REQUEST)), sleep=sleeps.append)
+    assert sleeps == []
+
+
+def test_sdk_bad_request_becomes_bad_request():
+    error = openai.BadRequestError("rejected", response=httpx.Response(400, request=_REQUEST), body=None)
+    with pytest.raises(BadRequest):
+        with_retry(_raiser(error), sleep=lambda s: None)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -485,18 +516,23 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.retry'`
 
 `scout/retry.py`:
 ```python
-"""Retry policy shared by the SAM and Muse Spark clients."""
+"""Retry policy shared by the SAM and Muse Spark clients.
+
+The OpenAI clients are built with max_retries=0, so this is the only retry layer.
+"""
 import time
 from typing import Callable, TypeVar
 
 T = TypeVar("T")
 
 RETRY_STATUS = {429, 500, 502, 503, 504}
-TRANSIENT_ERRORS = {"APIConnectionError", "APITimeoutError"}
+REJECTED_STATUS = {400, 413, 422}
+# Timeouts are not retried: a call that already used its whole timeout would not fit in the stop's budget twice.
+TRANSIENT_ERRORS = {"APIConnectionError"}
 
 
 class BadRequest(Exception):
-    """The API rejected the request (HTTP 400). Retrying the same request will not help."""
+    """The API rejected the request (HTTP 400, 413 or 422). Retrying the same request will not help."""
 
 
 def with_retry(fn: Callable[[], T], retries: int = 3, sleep: Callable[[float], None] = time.sleep) -> T:
@@ -505,7 +541,7 @@ def with_retry(fn: Callable[[], T], retries: int = 3, sleep: Callable[[float], N
             return fn()
         except Exception as error:
             status = getattr(error, "status_code", None)
-            if status == 400:
+            if status in REJECTED_STATUS:
                 raise BadRequest(str(error)) from error
             transient = status in RETRY_STATUS or type(error).__name__ in TRANSIENT_ERRORS
             if not transient or attempt == retries:
@@ -517,7 +553,7 @@ def with_retry(fn: Callable[[], T], retries: int = 3, sleep: Callable[[float], N
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_retry.py -v`
-Expected: 4 passed
+Expected: 9 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1043,9 +1079,12 @@ class SamClient:
 
     @classmethod
     def from_settings(cls, settings) -> "SamClient":
+        import httpx
         from openai import OpenAI
 
-        client = OpenAI(base_url=settings.base_url, api_key=settings.api_key, timeout=120.0)
+        # max_retries=0 leaves with_retry as the only retry layer; connect=5 fails fast on an unreachable host.
+        client = OpenAI(base_url=settings.base_url, api_key=settings.api_key,
+                        timeout=httpx.Timeout(120.0, connect=5.0), max_retries=0)
         return cls(lambda payload: client.responses.create(**payload).output_text, model=settings.sam_model)
 
     def fetch_raw(self, image: StopImage, text: str) -> str:
@@ -1405,9 +1444,12 @@ class Llm:
 
     @classmethod
     def from_settings(cls, settings) -> "Llm":
+        import httpx
         from openai import OpenAI
 
-        client = OpenAI(base_url=settings.base_url, api_key=settings.api_key, timeout=180.0)
+        # max_retries=0 leaves with_retry as the only retry layer; connect=5 fails fast on an unreachable host.
+        client = OpenAI(base_url=settings.base_url, api_key=settings.api_key,
+                        timeout=httpx.Timeout(180.0, connect=5.0), max_retries=0)
         return cls(client.responses.create, settings.agent_model)
 
     def turn(self, input, instructions: str | None = None, tools: list[dict] | None = None,
