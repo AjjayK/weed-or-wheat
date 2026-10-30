@@ -31,11 +31,13 @@ Muse Spark takes 13–16 s per turn, so the stop loop must use few turns.
      - Weed results pass the same crop-overlap check as `mark`.
    - **`mark(kind, boxes)`**, kind `crop` or `weed`, takes `boxes` as 1–16 items `{box: [x1, y1, x2, y2] in 0–1000, label: short text}` and makes one SAM request. The label is stored as the instance's `prompt`.
      - **crop:** each record becomes a crop instance.
-     - **weed:** for each record, compute `overlap = |mask ∩ crop union| / |mask|`.
-       - If `overlap ≥ 0.6`, nothing is added and the agent is told "box N: mostly crop".
-       - If the mask covers more than 12% of the frame, nothing is added and the agent is told "box N: too large for one plant; use smaller boxes".
-       - Otherwise the full mask becomes a weed instance with role `weed`, id_confidence unset, and `check_this` when `overlap > 0.3`.
+     - **weed:** for each record, compute the overlap with crop, counting only crop instances that are *not* canopy-sized. Canopy-sized means spanning at least a third of the image's long side; otherwise every weed growing inside a row canopy would look like crop.
+       - If at least 60% of the mask lies on that non-canopy crop, nothing is added and the agent is told "box N: mostly crop".
+       - If the mask covers more than 12% of the frame, it is kept as one patch with `check_this`. The agent is told "box N: large patch; counted as one, approximate", and the stop's count is marked approximate.
+       - Otherwise the full mask becomes a weed instance with role `weed`, id_confidence unset, and `check_this` when more than 30% of it overlaps any crop (a weed inside a canopy, which the agent should zoom on) or SAM's confidence is below 0.5.
        - Boxes SAM returned nothing for are reported as "box N: nothing found".
+       - A weed `mark` that uses all 16 boxes marks the count approximate, because it is then a floor.
+     - **Ordering:** within one turn, crop `mark`/`segment` calls run before the others, so the weed check always sees the crop.
    - **`zoom(instance_id | box)`**, where the box is in 0–1000.
    - **`classify`, `measure` and `finish`** are unchanged.
    - The tool's instance summary shows each box in 0–1000.

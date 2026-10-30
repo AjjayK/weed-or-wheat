@@ -2,6 +2,7 @@
 
 - **Date:** 2026-10-30
 - **Status:** Approved in brainstorming; ready for implementation planning
+- **Amended 2026-10-30:** weeds are found with boxes, not "plant minus crop". See `2026-10-30-boxes-redesign.md` in this folder; it overrides §8.1–8.2 where they differ.
 - **Working name:** weed-or-wheat (the product is a general weed-vs-crop scout; the name is not final)
 - **Event:** Meta Global AI Developer Hackathon, Indie Developer track, theme "Build for Your World"
 - **Deadline:** Wed 2026-11-04, 9:00 PM ET (target: submit by noon ET)
@@ -49,7 +50,7 @@ From the official participant guide (cerebralvalley.ai/e/meta-ai-developer-hacka
 
 1. **Start a walk.** Pick the crop: corn, soybean, or alfalfa. Optionally name the field.
 2. **Upload 1–10 photos** from one visit (JPG, PNG, HEIC). If a photo carries GPS, its stop gets a map pin.
-3. **Watch the agent work.** The page streams each stop's steps: segment, find candidates, zoom, identify, measure.
+3. **Watch the agent work.** The page streams each stop's steps: mark crop and weeds, zoom, identify, measure.
 4. **Read the report:**
    - Per stop: overlay (crop green, weeds magenta so red-green color-blind viewers can tell them apart, in-row zone shaded), measures, "check this" flags.
    - Field summary: metric cards (weed cover, density, frequency, decision).
@@ -63,7 +64,7 @@ From the official participant guide (cerebralvalley.ai/e/meta-ai-developer-hacka
 |---|---|---|
 | Weed cover % | Weed mask pixels ÷ ground pixels | Always |
 | Crop cover % | Crop mask pixels ÷ ground pixels | Always |
-| Weed count | Separate weed pieces after crop subtraction | Always; marked approximate when masks merge (grass mats) |
+| Weed count | Weed instances, one per boxed plant (redesign note) | Always; marked approximate when masks merge (grass mats) |
 | Density (plants/m²) | Count ÷ ground footprint | Straight-down shots only (see §8.4) |
 | Species | Agent identification from zoom crops or close-ups | When identified; else "unidentified broadleaf" or "unidentified grass" |
 | Height (in) and leaf count | Agent estimate from zoom crops | When visible; marked estimate |
@@ -115,7 +116,7 @@ app/
   models.py            Pydantic schemas (§7.3)
   ingest.py            upload handling: HEIC→RGB, EXIF orientation, resize ≤2048px, GPS extraction, image hash
 vision/
-  sam_client.py        segment_concept(image, phrase) / segment_prompts(image, objects) → list[Instance]; retries; cache by (image hash, prompt)
+  sam_client.py        segment_concept(image, phrase) / segment_boxes(image, boxes) → list[SamRecord]; retries; cache by (image hash, prompt)
   masks.py             decode masks to bool arrays, union/subtract, connected pieces, area
   rows.py              fit crop rows as lines; in-row band masks
   measure.py           per-stop metrics from current instance labels
@@ -151,7 +152,7 @@ eval/
 class Instance(BaseModel):
     id: str                      # "s3-i7"
     source: Literal["concept", "prompt"]
-    prompt: str                  # noun phrase or "point"/"box"
+    prompt: str                  # noun phrase, or the agent's label for a box
     box: tuple[int, int, int, int]
     sam_confidence: float | None
     area_px: int
@@ -235,22 +236,31 @@ class FieldReport(BaseModel):
 
 | Tool | Arguments | Returns | Notes |
 |---|---|---|---|
-| `segment` | `phrase: str` | instance summaries (id, box, confidence, area %) | One SAM concept call. Plural or case changes don't matter. |
-| `segment_at` | `points: list[{x,y,positive}] \| box` | one instance summary | SAM box/point prompt; used to fix one doubtful plant |
+| `segment` | `phrase: str, kind: crop \| weed` | instance summaries (id, label, box, confidence, area %) | One SAM concept call. It works for "crop row" and distinct weeds ("dandelion", "flower"), not for crop plants or weeds in a canopy. Weed results pass the weed check (§8.2). |
+| `mark` | `kind: crop \| weed, boxes: list[{box, label}]` (1–16) | per box: an instance summary, or "mostly crop" / "large patch" / "nothing found" | One multi-object SAM box request. The label is stored as the instance's prompt. |
 | `zoom` | `instance_id` or `box` | image crop (padded, ≤768px) | Sent back to the model to look at |
 | `classify` | `instance_id, role, species_id?, height_in?, leaf_count?, id_confidence` | ok / validation error | `species_id` must exist in `weeds.yaml` |
-| `measure` | none | current metrics (§5) | Pure code |
-| `finish` | `view_type, crop_stage?, notes` | ends loop | Rejected if any weed instance is still `unknown` and calls remain |
+| `measure` | `view_type` | current metrics (§5) | Pure code |
+| `finish` | `crop_stage?, notes` | ends loop | Rejected while a marked weed is unclassified and calls remain |
+
+Every box the agent sees or gives is `[x1, y1, x2, y2]` from 0 to 1000 on both axes. Tools convert to work-image pixels. `segment_at` stays in the SAM client, but no tool exposes it.
 
 ### 8.2 Loop
 
-1. **Inputs.** The system prompt gives the crop, the allowed `species_id` list, and the procedure: segment crop concept → segment "plant" → review candidates → zoom/re-prompt doubtful ones → classify → measure → finish.
-2. **Candidate generation in code.** After the crop and "plant" segments exist, `segment` responses include `candidates`: pieces of (union of "plant" masks − union of crop masks) larger than a minimum area (0.05% of image). These are registered as instances with `source="concept"` and `prompt="plant−crop"`.
-3. **Fallback.** If the "plant" concept returns nothing useful, the agent marks weed points in a full-image view and calls `segment_at`.
+1. **Inputs.** The system prompt gives the crop, the allowed `species_id` list, and the procedure. It aims for 6 turns or fewer, because Muse Spark takes 13–16 s per turn:
+   1. Mark the crop and the weeds in the first turn.
+   2. Zoom on at most 2 doubtful instances, and mark missed weeds once more if needed.
+   3. Classify every weed in one call.
+   4. Measure, then finish.
+2. **Weed check in code** (replaces candidate generation; the live tests showed "plant" minus crop doesn't work in crop canopies):
+   - A weed mask from `mark` or `segment` is dropped if at least 60% of it lies on separate crop plants. Row canopies, meaning crop masks spanning a third of the image's long side, never veto a weed.
+   - Weeds overlapping crop by more than 30% are kept with `check_this`.
+   - Masks over 12% of the frame are kept as one patch, with `check_this`, and make the count approximate.
+3. **Order within a turn.** Crop marks run before the turn's other calls, so the weed check sees the crop.
 4. **Limits.**
-   - Max 12 tool calls per stop and 90 seconds per stop.
+   - Max 12 tool calls per stop and 240 seconds per stop.
    - Stops run concurrently, at most 4 at a time.
-   - On hitting a limit, code calls `measure` and closes the stop, with unclassified pieces counted as "unidentified" and flagged.
+   - On hitting a limit, code calls `measure` and closes the stop. Weeds that were marked but never classified count as "unidentified" and are flagged.
 5. **Zoom images.** If the API rejects images in tool results, `zoom` returns a text ack and the loop appends the crop as a new user message with the image.
 
 ### 8.3 Field step
@@ -266,6 +276,8 @@ class FieldReport(BaseModel):
   - Take crop instance centroids and cluster them into lines with RANSAC, at most 6 lines.
   - Accept the row structure only if at least 2 lines each have at least 3 crop instances.
   - The in-row band is a line ± the median crop instance width.
+  - When any crop mask spans at least a third of the image's long side (a row canopy), the in-row zone is that canopy instead (`canopy_band`).
+  - There is no in-row zone for alfalfa, which is solid-seeded. Sky is removed from the zone.
 - **Straight-down footprint:**
   - Assume a capture height of 1.2 m (user-adjustable) and a horizontal field of view of 69° (typical phone main camera).
   - Footprint width = 2·h·tan(FOV/2); height follows from the aspect ratio.
@@ -307,7 +319,7 @@ waterhemp:
 
 A species may ship with `sources: []` only if both thresholds are null and `zero_tolerance` is false. The catch-all defaults then apply.
 
-Species list (v1, 33 ids): waterhemp, palmer_amaranth, redroot_pigweed, common_lambsquarters, giant_ragweed, common_ragweed, velvetleaf, horseweed, kochia, common_cocklebur, pennsylvania_smartweed, morningglory, jimsonweed, eastern_black_nightshade, giant_foxtail, green_foxtail, yellow_foxtail, barnyardgrass, large_crabgrass, fall_panicum, shattercane, woolly_cupgrass, volunteer_corn, canada_thistle, dandelion, common_milkweed, wild_mustard, field_pennycress, henbit, purple_deadnettle, common_chickweed, yellow_nutsedge, quackgrass. Plus two catch-alls: `unidentified_broadleaf` and `unidentified_grass`, which always carry a "check this" flag.
+Species list (v1, 34 ids): waterhemp, palmer_amaranth, redroot_pigweed, common_lambsquarters, giant_ragweed, common_ragweed, velvetleaf, horseweed, kochia, common_cocklebur, pennsylvania_smartweed, morningglory, jimsonweed, eastern_black_nightshade, giant_foxtail, green_foxtail, yellow_foxtail, barnyardgrass, large_crabgrass, fall_panicum, shattercane, woolly_cupgrass, volunteer_corn, canada_thistle, dandelion, common_milkweed, wild_mustard, field_pennycress, henbit, purple_deadnettle, common_chickweed, yellow_nutsedge, quackgrass, field_horsetail. Plus two catch-alls: `unidentified_broadleaf` and `unidentified_grass`, which always carry a "check this" flag.
 
 **Default threshold:** any species with no sourced threshold, including the catch-alls, uses `DEFAULT_ACTION_COVER_PCT = 5.0` in `rules.py`. This is a tool default, not an agronomic source, and the report labels it that way in the rule trace.
 
@@ -315,7 +327,7 @@ Species list (v1, 33 ids): waterhemp, palmer_amaranth, redroot_pigweed, common_l
 
 | Case | Behavior |
 |---|---|
-| SAM returns zero matches | Normal result. For the crop concept the agent may try up to 2 alternative phrases (e.g., "soybean seedling"); then the stop is `no_crop_found` and is excluded from field averages, with a note. |
+| SAM returns zero matches | Normal result; a box SAM finds nothing in is reported to the agent as "nothing found". A stop with no crop instance is `no_crop_found` and is excluded from field averages, with a note. Alfalfa is the exception, since crop boxes are optional there. |
 | HTTP 429 / 5xx | Retry up to 3 times with exponential backoff (1s, 2s, 4s). |
 | HTTP 400 | No retry (per docs). The tool returns the error message to the agent once; a second 400 on the same tool fails the stop. |
 | Stop fails | Marked `failed` in the report; other stops continue. Field step runs if ≥1 stop is `ok`. |
@@ -327,7 +339,7 @@ Species list (v1, 33 ids): waterhemp, palmer_amaranth, redroot_pigweed, common_l
 
 ## 12. Testing and evaluation
 
-- **Unit tests (pytest):** mask decode and area math on synthetic masks; crop subtraction and piece extraction; row fitting on synthetic centroids; footprint math; every branch of `rules.py`; `lookup.py` filters; quote verification in `build_labels.py`; the number check on the explanation.
+- **Unit tests (pytest):** mask decode and area math on synthetic masks; box conversion and the weed check; row fitting on synthetic centroids; footprint math; every branch of `rules.py`; `lookup.py` filters; quote verification in `build_labels.py`; the number check on the explanation.
 - **Recorded fixtures:** real SAM and Muse Spark responses for 5 photos, saved on day 1–2, so the vision and agent plumbing can be tested offline at no cost.
 - **Agreement check:** the user labels ~15 photos in `eval/labels.csv`: weeds present (y/n), main species, cover bucket (<2%, 2–10%, >10%). `run_eval.py` reports agreement per field. This is used to tune prompts and quoted in the demo if it is good.
 - **Label check:** hand-verify 10 random `UseRecord`s against their PDF pages; target ≥9/10 correct before the demo.
@@ -343,7 +355,7 @@ Species list (v1, 33 ids): waterhemp, palmer_amaranth, redroot_pigweed, common_l
 
 | Day | Work | Checkpoint |
 |---|---|---|
-| Fri Oct 30 | Claim credits and API key; confirm model ids; spike SAM on 6 photos ("soybean plant", "corn plant", "plant", "grass"); mask decode and overlay; first Muse Spark tool call; record fixtures. | **Go/no-go:** does "plant" minus crop give usable weed candidates? If not, switch to agent-marked points plus `segment_at` (§8.2.3). |
+| Fri Oct 30 | Claim credits and API key; confirm model ids; spike SAM on 6 photos ("soybean plant", "corn plant", "plant", "grass"); mask decode and overlay; first Muse Spark tool call; record fixtures. | **Go/no-go:** does "plant" minus crop give usable weed candidates? If not, switch to agent-marked points plus `segment_at`. Outcome: no-go; boxes chosen (redesign note). |
 | Sat Oct 31 | Stop agent loop, tools, `measure`, rows; run on 10 photos. User picks focus products and demo walks. | Per-stop results look sensible |
 | Sun Nov 1 | `build_labels.py`, `use_records.json`, `lookup.py`, `weeds.yaml`, `rules.py` | Lookup returns cited options for the demo species |
 | Mon Nov 2 | Field step, report rendering, FastAPI routes, web page with SSE; end-to-end locally | Full walk runs end to end |
@@ -352,7 +364,7 @@ Species list (v1, 33 ids): waterhemp, palmer_amaranth, redroot_pigweed, common_l
 
 ## 15. Risks and fallbacks
 
-1. **SAM "plant" merges grass mats or misses tiny seedlings.** Cover % stays valid; counts are marked approximate. Fallback: agent-marked points with `segment_at`.
+1. **Boxes land on crop or miss small weeds.** The weed check drops boxes on crop plants, and the agent zooms on flagged ones. Patches, or a weed mark that uses all 16 boxes, make the count approximate.
 2. **Images in tool results may be unsupported.** Fallback in §8.2.5.
 3. **Label extraction errors.** Small product set, quote verification, hand check, citations visible to the user.
 4. **Schedule slip.** Cut order if behind: CSV export → GPS pins → in-row/between-row split → straight-down density. Never cut: overlays, agent step log, decision with rule trace, cited options, live URL, video.

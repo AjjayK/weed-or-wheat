@@ -55,13 +55,22 @@
 ## Refinements to the spec made in this plan
 
 1. All code lives under one package, `scout/`, so imports are unambiguous: `scout/app`, `scout/vision`, `scout/agent`, `scout/agronomy`, `scout/labels`, `scout/report`, `scout/web`. The evaluation folder is `evaluation/`, because `eval` shadows a builtin.
-2. `Instance.source` gains `"candidate"` for pieces derived as plant minus crop.
-3. `segment` takes a `kind` (`crop`, `all_plants`, or `weed`); `segment_at` takes a `kind` too. `measure(view_type)` sets the view type, and `finish(crop_stage, notes)` no longer takes one. `classify` accepts a batch of items.
+2. `Instance.source` gains `"candidate"`. It was for pieces derived as plant minus crop; since the boxes redesign (item 9) it is unused but stays in the Literal.
+3. Tools changed:
+   - `segment` takes a `kind` (`crop` or `weed`).
+   - `mark(kind, boxes)` replaces `segment_at`.
+   - `measure(view_type)` sets the view type, and `finish(crop_stage, notes)` no longer takes one.
+   - `classify` accepts a batch of items.
 4. `StopResult` gains `species_cover_pct`, `species_density`, and `species_max_height_in`. The rules need per-species values.
 5. `UseRecord` gains `pdf_file`, so the report can link straight to the label page. `FieldReport.options` is `list[LabelOption]`, where `LabelOption` wraps a record with an `over_size_limit` flag.
 6. Zoom crops always go in a user message, since the docs say images are only processed there.
 7. Offline tests build realistic SAM text with the parser's own encoder instead of recorded fixtures. Spike outputs go to the git-ignored `spike_out/`.
 8. Sample walks are run once, then committed as cached reports in `demo/`. The live site can then show them without spending API credits. GPS in samples is shifted by a random offset.
+9. **Boxes redesign** (after the live tests; `docs/superpowers/specs/2026-10-30-boxes-redesign.md`):
+   - Weeds are found by Muse Spark boxing each plant in 0–1000 coordinates. SAM segments all of a call's boxes in one request (`SamClient.segment_boxes`). There are no plant-minus-crop candidates.
+   - Weeds win over crop in the overlay and the measurements.
+   - The in-row zone is the row canopy when a crop mask spans a third of the image, else fitted rows, and none for alfalfa.
+   - `stop_timeout_s` is 240.
 
 ## File map
 
@@ -75,17 +84,17 @@ scout/app/pipeline.py        Walk runner: stops in threads -> field report; cach
 scout/app/main.py            FastAPI routes + SSE
 scout/vision/masks.py        Mask paste/union/pieces/bbox/pad
 scout/vision/sam_parse.py    SAM text -> SamRecord with box-local mask
-scout/vision/sam_client.py   SAM requests (concept + point/box), retry, cache
+scout/vision/sam_client.py   SAM requests (concept, point/box, multi-box), retry, cache
 scout/vision/overlay.py      Colored overlay image
 scout/vision/rows.py         Crop-row fitting and in-row band
 scout/vision/measure.py      Metrics from instances + masks
 scout/agent/llm.py           Responses API wrapper: LlmTurn/ToolCall, user_message
-scout/agent/state.py         StopState: instances, masks, candidates, step log, overlay
+scout/agent/state.py         StopState: 0-1000 box conversion, weed check, in-row zone, step log, overlay
 scout/agent/tools.py         Tool schemas + ToolRunner
 scout/agent/prompts.py       Agent instructions
 scout/agent/stop_agent.py    Tool loop for one stop + finalize
 scout/agent/field_agent.py   Field decision, label options, checked explanation
-scout/agronomy/weeds.yaml    35 species with names, synonyms, thresholds, sources
+scout/agronomy/weeds.yaml    36 entries (34 species + 2 catch-alls) with names, synonyms, thresholds, sources
 scout/agronomy/weeds.py      WeedBook loader/resolver
 scout/agronomy/rules.py      Decision rules and urgency
 scout/labels/epa.py          EPA PPLS fetch + PDF download
@@ -112,6 +121,8 @@ docs/spike-notes.md, docs/demo-script.md
 - Modify: `.gitignore`
 - Test: `tests/test_config.py`
 
+**Amended for the boxes redesign:** `stop_timeout_s` is 240 (it was 90), because Muse Spark takes 13–16 s per turn. Change the committed `scout/config.py` to match.
+
 - [ ] **Step 1: Create the venv and dependency files**
 
 `requirements.txt`:
@@ -125,7 +136,7 @@ scipy>=1.11
 pillow>=10.3
 pillow-heif>=0.16
 openai>=1.66,<2
-meta-sam-parser>=0.1.0
+meta-sam-parser==0.1.0
 pypdf>=4.2
 pyyaml>=6.0
 jinja2>=3.1
@@ -176,6 +187,18 @@ Expected: installs without errors.
 
 - [ ] **Step 2: Write the failing test**
 
+`tests/conftest.py`:
+```python
+"""Test-wide fixtures."""
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_api_key(monkeypatch):
+    """Tests never call the network, so a real key from .env must not be visible to them."""
+    monkeypatch.delenv("MODEL_API_KEY", raising=False)
+```
+
 `tests/test_config.py`:
 ```python
 from scout.config import Settings, get_settings
@@ -184,6 +207,7 @@ from scout.config import Settings, get_settings
 def test_get_settings_reads_env(monkeypatch):
     monkeypatch.setenv("MODEL_API_KEY", "k-123")
     monkeypatch.setenv("AGENT_MODEL", "muse-spark-1.2")
+    monkeypatch.delenv("SAM_MODEL", raising=False)
     settings = get_settings()
     assert settings.api_key == "k-123"
     assert settings.agent_model == "muse-spark-1.2"
@@ -223,7 +247,7 @@ class Settings:
     full_max_px: int = 2048
     work_max_px: int = 1024
     max_tool_calls: int = 12
-    stop_timeout_s: float = 90.0
+    stop_timeout_s: float = 240.0  # Muse Spark takes 13-16 s per turn
     max_concurrent_stops: int = 4
     max_photos: int = 10
     max_upload_bytes: int = 25_000_000
@@ -1128,6 +1152,8 @@ git commit -m "feat: ingest photos with rotation, GPS, and two sizes"
 - Create: `scout/vision/sam_client.py`
 - Test: `tests/test_sam_client.py`
 
+**Amended for the boxes redesign:** `segment_boxes` sends up to 16 boxes as one multi-object request. It and its two tests were added after this task was first committed; apply them to the committed files before Task 15.
+
 - [ ] **Step 1: Write the failing test**
 
 `tests/test_sam_client.py`:
@@ -1204,6 +1230,34 @@ def test_cache_is_bounded():
     assert len(calls) == 4  # "a" was evicted by "c"
     sam.segment_concept(image, "a")
     assert len(calls) == 4
+
+
+def test_segment_boxes_sends_all_boxes_in_one_request():
+    image = make_image(100, 80)
+    sent = []
+
+    def send(payload):
+        sent.append(payload)
+        return sam_text([("1", (5, 6, 15, 16), np.ones((10, 10), bool), 0.9),
+                         ("3", (60, 10, 70, 20), np.ones((10, 10), bool), 0.7)], image.size)
+
+    sam = SamClient(send, sleep=lambda s: None)
+    records = sam.segment_boxes(image, [(5, 6, 50, 60), (10.4, 10, 20, 30), (60, 10, 70, 20)])
+    assert sent[0]["input"][0]["content"][0]["text"] == (
+        "<0f>1<|box;x1=5;y1=6;x2=49;y2=59;w=100;h=80|>,2<|box;x1=10;y1=10;x2=19;y2=29;w=100;h=80|>,"
+        "3<|box;x1=60;y1=10;x2=69;y2=19;w=100;h=80|>")
+    assert [r.object_id for r in records] == ["1", "3"]  # SAM found nothing in box 2
+    sam.segment_boxes(image, [(5, 6, 50, 60), (10, 10, 20, 30), (60, 10, 70, 20)])
+    assert len(sent) == 1  # same boxes after int coercion: served from the cache
+
+
+def test_segment_boxes_takes_1_to_16_boxes():
+    sam = SamClient(lambda p: "", sleep=lambda s: None)
+    with pytest.raises(ValueError):
+        sam.segment_boxes(make_image(32, 32), [])
+    with pytest.raises(ValueError):
+        sam.segment_boxes(make_image(32, 32), [(0, 0, 4, 4)] * 17)
+    assert sam.segment_boxes(make_image(32, 32), [(0, 0, 4, 4)] * 16) == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1230,6 +1284,7 @@ from scout.retry import with_retry
 from scout.vision.sam_parse import SamRecord, parse_sam_output
 
 log = logging.getLogger(__name__)
+MAX_OBJECTS = 16  # SAM 3.1 takes at most 16 objects in one box/point request
 
 
 class SamClient:
@@ -1319,12 +1374,21 @@ class SamClient:
         )
         text = build_object_prompt(size=image.size, objects=[PromptObject(id=1, prompts=[prompt])])
         return self._records(image, text)
+
+    def segment_boxes(self, image: StopImage, boxes: Sequence[Box]) -> list[SamRecord]:
+        """One multi-object request: object i + 1 is boxes[i]. A record's object_id names its box ("1" is boxes[0]);
+        boxes SAM found nothing for are absent."""
+        if not 1 <= len(boxes) <= MAX_OBJECTS:
+            raise ValueError(f"segment_boxes takes 1 to {MAX_OBJECTS} boxes, got {len(boxes)}")
+        objects = [PromptObject(id=i + 1, prompts=[FramePrompt(frame=0, box=PromptBox(*(int(v) for v in box)))])
+                   for i, box in enumerate(boxes)]
+        return self._records(image, build_object_prompt(size=image.size, objects=objects))
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_sam_client.py -v`
-Expected: 6 passed
+Expected: 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1526,7 +1590,7 @@ Expected: one line per prompt with counts and timings, and PNGs in `spike_out/`.
 
 Open the `*__candidates.png` files. **Go** if, on at least 4 of the 6 photos, the magenta pieces mostly sit on weeds rather than on crop, and most visible weeds (grasses included) carry some magenta. **No-go:** try `--extra "weed" "seedling" "green plant"` on the failures.
 
-If the "plant" concept is still poor, adopt the fallback (spec §8.2.3). The agent marks points on weeds in the full photo and calls `segment_at`. The tools in Task 16 already support this; strengthen `prompts.py` step 3 wording in Task 17.
+If the "plant" concept is still poor, adopt the fallback (spec §8.2.3). The agent marks points on weeds in the full photo and calls `segment_at`. The tools in Task 16 already support this; strengthen `prompts.py` step 3 wording in Task 17. (Outcome: no-go. The live tests chose boxes over points; Tasks 15–17 follow the boxes redesign note.)
 
 Create `docs/spike-notes.md` with what was observed:
 ```markdown
@@ -2065,7 +2129,7 @@ import numpy as np
 import pytest
 
 from scout.models import Instance
-from scout.vision.measure import compute_metrics, footprint_m2
+from scout.vision.measure import compute_metrics, footprint_m2, species_key
 
 SIZE = (100, 100)
 
@@ -2124,6 +2188,71 @@ def test_in_row_share_and_approximate_count():
     assert compute_metrics(instances, masks, SIZE, "row", band=band).in_row_weed_share == 0.5
     big = compute_metrics([_inst("w3", "weed", (0, 40, 50, 100))], {"w3": _mask((0, 40, 50, 100))}, SIZE, "row")
     assert big.count_approximate is True
+
+
+def _boxed(iid, role, species=None, source="prompt", prompt="box", height=None):
+    return Instance(id=iid, source=source, prompt=prompt, box=(0, 0, 1, 1), area_px=0, role=role,
+                    species_id=species, height_in=height)
+
+
+def test_footprint_is_the_same_portrait_or_landscape():
+    assert footprint_m2((4032, 3024), "top_down") == pytest.approx(2.04, abs=0.01)
+    assert footprint_m2((3024, 4032), "top_down") == pytest.approx(footprint_m2((4032, 3024), "top_down"))
+    assert footprint_m2((0, 0), "top_down") is None
+
+
+def test_boxed_weed_inside_row_canopy_wins_over_crop():
+    row, weed = _mask((40, 0, 60, 100)), _mask((45, 40, 55, 50))
+    m = compute_metrics([_boxed("c", "crop"), _boxed("w", "weed", "waterhemp", height=4.0)], {"c": row, "w": weed},
+                        SIZE, "row", band=_mask((35, 0, 65, 100)))
+    assert (m.weed_cover_pct, m.crop_cover_pct, m.weed_count) == (1.0, 19.0, 1)
+    assert m.in_row_weed_share == 1.0 and m.max_height_in == 4.0
+
+
+def test_weed_over_crop_edge_counts_once_as_weed():
+    m = compute_metrics([_boxed("c", "crop"), _boxed("w", "weed", "waterhemp")],
+                        {"c": _mask((0, 0, 10, 10)), "w": _mask((5, 0, 15, 10))}, SIZE, "row")
+    assert (m.weed_cover_pct, m.crop_cover_pct) == (1.0, 0.5)
+
+
+def test_overlapping_weeds_count_each_pixel_once():
+    m = compute_metrics([_boxed("a", "weed", "waterhemp"), _boxed("b", "weed", "giant_ragweed")],
+                        {"a": _mask((0, 0, 10, 10)), "b": _mask((5, 0, 15, 10))}, SIZE, "row")
+    assert m.weed_cover_pct == 1.5 and m.species_cover_pct == {"waterhemp": 1.0, "giant_ragweed": 0.5}
+    dup = compute_metrics([_boxed("a", "weed", "waterhemp"), _boxed("b", "weed", "waterhemp")],
+                          {"a": _mask((0, 0, 10, 10)), "b": _mask((2, 2, 12, 12))}, SIZE, "row")
+    assert dup.weed_count == 1  # a second box mostly on the same plant
+
+
+def test_sky_rules():
+    weed = {"w": _mask((0, 60, 10, 70))}
+    half_sky = _mask((0, 0, 100, 50))
+    assert compute_metrics([_boxed("w", "weed")], weed, SIZE, "top_down", sky=half_sky).weed_cover_pct == 1.0
+    assert compute_metrics([_boxed("w", "weed")], weed, SIZE, "row", sky=half_sky).weed_cover_pct == 2.0
+    all_sky = np.ones((100, 100), bool)
+    assert compute_metrics([_boxed("w", "weed")], weed, SIZE, "wide", sky=all_sky).weed_cover_pct == 1.0
+
+
+def test_roles_missing_masks_and_density_semantics():
+    instances = [_boxed("u", "unknown"), _boxed("i", "ignore"), _boxed("gone", "weed")]
+    masks = {"u": _mask((0, 0, 10, 10)), "i": _mask((20, 0, 30, 10))}
+    m = compute_metrics(instances, masks, SIZE, "top_down")
+    assert m.weed_count == 0 and m.density_per_m2 == 0.0 and m.species_density == {}  # a top-down stop with no weeds
+    assert m.in_row_weed_share is None
+    assert compute_metrics(instances, masks, SIZE, "close_up").species_density is None
+
+
+def test_approximate_only_for_big_pieces_outside_close_ups():
+    small = compute_metrics([_boxed("w", "weed")], {"w": _mask((0, 0, 10, 10))}, SIZE, "row")
+    assert small.count_approximate is False
+    big = {"w": _mask((0, 0, 30, 30))}
+    assert compute_metrics([_boxed("w", "weed")], big, SIZE, "row").count_approximate is True
+    assert compute_metrics([_boxed("w", "weed")], big, SIZE, "close_up").count_approximate is False
+
+
+def test_grass_words_in_labels_mean_unidentified_grass():
+    assert species_key(_boxed("a", "weed", prompt="giant foxtail")) == "unidentified_grass"
+    assert species_key(_boxed("b", "weed", prompt="pigweed seedling")) == "unidentified_broadleaf"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2145,7 +2274,10 @@ from scout.models import Instance
 
 APPROX_PIECE_FRAC = 0.02  # one weed piece over 2% of the ground likely merges several plants
 CAPTURE_HEIGHT_M = 1.2
-PHONE_HFOV_DEG = 69.0
+GRASS_WORDS = ("grass", "foxtail", "sedge", "barnyard", "panicum", "shattercane")
+PHONE_HFOV_DEG = 69.0  # spans the sensor's long side, whichever way the phone was held
+MIN_GROUND_FRAC = 0.2  # a sky mask leaving less ground than this is a bad SAM answer; ignore it
+MIN_OWN_FRAC = 0.5  # a weed must own at least half of its on-ground pixels to count as a plant
 
 
 @dataclass
@@ -2165,29 +2297,35 @@ class Metrics:
 
 def footprint_m2(size: tuple[int, int], view_type: str, capture_height_m: float = CAPTURE_HEIGHT_M,
                  hfov_deg: float = PHONE_HFOV_DEG) -> float | None:
-    """Ground area of a straight-down photo; None for any other view."""
-    if view_type != "top_down":
+    """Ground area of a straight-down photo; None for any other view. The FOV spans the photo's long side."""
+    long_px, short_px = max(size), min(size)
+    if view_type != "top_down" or short_px <= 0:
         return None
-    width, height = size
-    ground_width = 2 * capture_height_m * math.tan(math.radians(hfov_deg / 2))
-    return ground_width * ground_width * height / width
+    ground_long = 2 * capture_height_m * math.tan(math.radians(hfov_deg / 2))
+    return ground_long * ground_long * short_px / long_px
 
 
 def species_key(instance: Instance) -> str:
     if instance.species_id:
         return instance.species_id
-    return "unidentified_grass" if "grass" in instance.prompt.lower() else "unidentified_broadleaf"
+    label = instance.prompt.lower()
+    return "unidentified_grass" if any(word in label for word in GRASS_WORDS) else "unidentified_broadleaf"
 
 
 def compute_metrics(instances: list[Instance], masks: dict[str, np.ndarray], size: tuple[int, int],
-                    view_type: str, sky: np.ndarray | None = None, band: np.ndarray | None = None) -> Metrics:
+                    view_type: str, sky: np.ndarray | None = None, band: np.ndarray | None = None,
+                    capture_height_m: float = CAPTURE_HEIGHT_M) -> Metrics:
+    """Each pixel counts once. Weeds win over crop (the tools already dropped weed masks that were mostly crop),
+    and where weeds overlap, the one registered first owns the pixels."""
     width, height = size
-    ground = ~sky if sky is not None else np.ones((height, width), dtype=bool)
+    ground = np.ones((height, width), dtype=bool)
+    if sky is not None and view_type in ("row", "wide") and (~sky).mean() >= MIN_GROUND_FRAC:
+        ground = ~np.asarray(sky, dtype=bool)
     ground_px = max(int(ground.sum()), 1)
     crop = np.zeros((height, width), dtype=bool)
     for inst in instances:
-        if inst.role == "crop":
-            crop |= masks[inst.id]
+        if inst.role == "crop" and inst.id in masks:
+            crop |= np.asarray(masks[inst.id], dtype=bool)
     crop &= ground
     weed_mask = np.zeros((height, width), dtype=bool)
     species_masks: dict[str, np.ndarray] = {}
@@ -2196,23 +2334,29 @@ def compute_metrics(instances: list[Instance], masks: dict[str, np.ndarray], siz
     heights: list[float] = []
     approximate = False
     for inst in instances:
-        if inst.role != "weed":
+        if inst.role != "weed" or inst.id not in masks:
             continue
-        mask = masks[inst.id] & ground & ~crop
-        if not mask.any():
-            continue
+        on_ground = np.asarray(masks[inst.id], dtype=bool) & ground
+        own = on_ground & ~weed_mask
+        own_px = int(own.sum())
+        if own_px == 0 or own_px < MIN_OWN_FRAC * int(on_ground.sum()):
+            continue  # a second box on a plant already counted
         key = species_key(inst)
-        weed_mask |= mask
-        species_masks[key] = species_masks.get(key, np.zeros_like(mask)) | mask
+        weed_mask |= own
+        if key in species_masks:
+            species_masks[key] |= own
+        else:
+            species_masks[key] = own
         species_counts[key] = species_counts.get(key, 0) + 1
         if inst.height_in is not None:
             heights.append(inst.height_in)
             species_heights[key] = max(species_heights.get(key, 0.0), inst.height_in)
-        if mask.sum() > APPROX_PIECE_FRAC * ground_px:
+        if view_type != "close_up" and own_px > APPROX_PIECE_FRAC * ground_px:
             approximate = True
+    crop &= ~weed_mask
     weed_px = int(weed_mask.sum())
     count = sum(species_counts.values())
-    area = footprint_m2(size, view_type)
+    area = footprint_m2(size, view_type, capture_height_m)
     return Metrics(
         weed_cover_pct=round(100 * weed_px / ground_px, 2),
         crop_cover_pct=round(100 * int(crop.sum()) / ground_px, 2),
@@ -2231,7 +2375,7 @@ def compute_metrics(instances: list[Instance], masks: dict[str, np.ndarray], siz
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_measure.py -v`
-Expected: 4 passed
+Expected: 12 passed
 
 - [ ] **Step 5: Commit**
 
@@ -2250,12 +2394,14 @@ git commit -m "feat: compute weed cover, counts, density, and in-row share"
 
 `tests/test_weeds.py`:
 ```python
-from scout.agronomy.weeds import WeedBook
+import pytest
+
+from scout.agronomy.weeds import WeedBook, WeedInfo
 
 
 def test_default_book_loads_all_species():
     book = WeedBook.load()
-    assert len(book.ids()) == 35
+    assert len(book.ids()) == 36
     assert "unidentified_broadleaf" in book and "unidentified_grass" in book
 
 
@@ -2270,6 +2416,68 @@ def test_resolve_names_and_synonyms():
 
 def test_shipped_thresholds_have_sources():
     assert WeedBook.load().validate() == []
+
+
+def _info(sid, **kw):
+    return WeedInfo(id=sid, common_name=kw.pop("common_name", sid), scientific_name="", type="broadleaf", **kw)
+
+
+@pytest.mark.parametrize("phrase, expected", [
+    ("waterhemp pigweed", "waterhemp"),
+    ("Waterhemp (Amaranthus tuberculatus)", "waterhemp"),
+    ("dandelion flower", "dandelion"),
+    ("Dandelions", "dandelion"),
+    ("green foxtail seedlings", "green_foxtail"),
+    ("giant_foxtail", "giant_foxtail"),
+    ("Lamb's-quarters", "common_lambsquarters"),
+    ("lambs quarters", "common_lambsquarters"),
+    ("velvet leaf", "velvetleaf"),
+    ("morning glories", "morningglory"),
+    ("Palmer's amaranth", "palmer_amaranth"),
+    ("horsetail weed", "field_horsetail"),
+    ("Marestail", "horseweed"),
+])
+def test_resolve_tolerates_model_phrasing(phrase, expected):
+    assert WeedBook.load().resolve(phrase) == expected
+
+
+@pytest.mark.parametrize("phrase", ["pigweed", "ragweed", "giant ragweed or common ragweed", "not a weed", "", None])
+def test_resolve_refuses_unknown_and_ambiguous(phrase):
+    assert WeedBook.load().resolve(phrase) is None
+
+
+def test_every_name_belongs_to_one_species():
+    assert [p for p in WeedBook.load().validate() if "several species" in p] == []
+
+
+def test_validate_flags_bad_entries():
+    book = WeedBook({
+        "a": _info("a", zero_tolerance=True),
+        "b": WeedInfo(id="b", common_name="b", scientific_name="", type="weedy", action_density=1.5, sources=["s"]),
+        "c": _info("c", action_cover_pct="1-2", sources=["s"]),
+        "d": _info("d", synonyms=["shared"]), "e": _info("e", synonyms=["shared"]),
+    })
+    problems = "\n".join(book.validate())
+    for fragment in ("a: threshold without a source", "b: type 'weedy'", "c: action_cover_pct", "'shared'"):
+        assert fragment in problems
+
+
+def test_load_errors_name_the_species(tmp_path):
+    path = tmp_path / "weeds.yaml"
+    path.write_text("waterhemp: {common_name: x, scientific_name: y, type: broadleaf, zero_tolerence: true}\n")
+    with pytest.raises(ValueError, match="waterhemp"):
+        WeedBook.load(path)
+    path.write_text("waterhemp: {common_name: x, scientific_name: y, type: broadleaf, synonyms: common waterhemp}\n")
+    with pytest.raises(ValueError, match="waterhemp"):
+        WeedBook.load(path)
+    path.write_text("")
+    with pytest.raises(ValueError):
+        WeedBook.load(path)
+
+
+def test_contains_ignores_non_strings():
+    book = WeedBook.load()
+    assert "waterhemp" in book and ["waterhemp"] not in book and None not in book
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2281,25 +2489,25 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.agronomy.weeds'
 
 `scout/agronomy/weeds.yaml`. Thresholds start empty; Task 19 fills them with sources.
 ```yaml
-waterhemp: {common_name: waterhemp, scientific_name: Amaranthus tuberculatus, type: broadleaf, synonyms: [common waterhemp, tall waterhemp]}
-palmer_amaranth: {common_name: Palmer amaranth, scientific_name: Amaranthus palmeri, type: broadleaf, synonyms: [palmer pigweed, careless weed]}
-redroot_pigweed: {common_name: redroot pigweed, scientific_name: Amaranthus retroflexus, type: broadleaf, synonyms: [redroot, rough pigweed, pigweed]}
-common_lambsquarters: {common_name: common lambsquarters, scientific_name: Chenopodium album, type: broadleaf, synonyms: [lambsquarters, lamb's-quarters]}
+waterhemp: {common_name: waterhemp, scientific_name: Amaranthus tuberculatus, type: broadleaf, synonyms: [common waterhemp, tall waterhemp, waterhemp pigweed, Amaranthus rudis]}
+palmer_amaranth: {common_name: Palmer amaranth, scientific_name: Amaranthus palmeri, type: broadleaf, synonyms: [palmer pigweed, careless weed, palmers amaranth]}
+redroot_pigweed: {common_name: redroot pigweed, scientific_name: Amaranthus retroflexus, type: broadleaf, synonyms: [redroot, rough pigweed]}
+common_lambsquarters: {common_name: common lambsquarters, scientific_name: Chenopodium album, type: broadleaf, synonyms: [lambsquarters]}
 giant_ragweed: {common_name: giant ragweed, scientific_name: Ambrosia trifida, type: broadleaf, synonyms: [buffaloweed, great ragweed]}
 common_ragweed: {common_name: common ragweed, scientific_name: Ambrosia artemisiifolia, type: broadleaf, synonyms: [annual ragweed, short ragweed]}
 velvetleaf: {common_name: velvetleaf, scientific_name: Abutilon theophrasti, type: broadleaf, synonyms: [buttonweed, butterprint]}
-horseweed: {common_name: horseweed, scientific_name: Conyza canadensis, type: broadleaf, synonyms: [marestail, Erigeron canadensis]}
-kochia: {common_name: kochia, scientific_name: Bassia scoparia, type: broadleaf, synonyms: [fireweed, burningbush, Kochia scoparia]}
+horseweed: {common_name: horseweed, scientific_name: Conyza canadensis, type: broadleaf, synonyms: [marestail, Erigeron canadensis, Canada fleabane, Canadian horseweed]}
+kochia: {common_name: kochia, scientific_name: Bassia scoparia, type: broadleaf, synonyms: [burningbush, summer cypress, Mexican fireweed, Kochia scoparia]}
 common_cocklebur: {common_name: common cocklebur, scientific_name: Xanthium strumarium, type: broadleaf, synonyms: [cocklebur]}
 pennsylvania_smartweed: {common_name: Pennsylvania smartweed, scientific_name: Persicaria pensylvanica, type: broadleaf, synonyms: [smartweed, Polygonum pensylvanicum]}
-morningglory: {common_name: morningglory, scientific_name: Ipomoea spp., type: broadleaf, synonyms: [ivyleaf morningglory, tall morningglory, entireleaf morningglory, morning glory]}
-jimsonweed: {common_name: jimsonweed, scientific_name: Datura stramonium, type: broadleaf, synonyms: [jimson weed, thornapple]}
-eastern_black_nightshade: {common_name: eastern black nightshade, scientific_name: Solanum ptycanthum, type: broadleaf, synonyms: [black nightshade, nightshade]}
+morningglory: {common_name: morningglory, scientific_name: Ipomoea spp., type: broadleaf, synonyms: [ivyleaf morningglory, tall morningglory, entireleaf morningglory, pitted morningglory, Ipomoea hederacea, Ipomoea purpurea, Ipomoea lacunosa]}
+jimsonweed: {common_name: jimsonweed, scientific_name: Datura stramonium, type: broadleaf, synonyms: [thornapple]}
+eastern_black_nightshade: {common_name: eastern black nightshade, scientific_name: Solanum ptycanthum, type: broadleaf, synonyms: [black nightshade, nightshade, Solanum ptychanthum, Solanum nigrum]}
 giant_foxtail: {common_name: giant foxtail, scientific_name: Setaria faberi, type: grass, synonyms: [foxtail]}
 green_foxtail: {common_name: green foxtail, scientific_name: Setaria viridis, type: grass, synonyms: []}
 yellow_foxtail: {common_name: yellow foxtail, scientific_name: Setaria pumila, type: grass, synonyms: [Setaria glauca]}
-barnyardgrass: {common_name: barnyardgrass, scientific_name: Echinochloa crus-galli, type: grass, synonyms: [barnyard grass]}
-large_crabgrass: {common_name: large crabgrass, scientific_name: Digitaria sanguinalis, type: grass, synonyms: [crabgrass]}
+barnyardgrass: {common_name: barnyardgrass, scientific_name: Echinochloa crus-galli, type: grass, synonyms: [cockspur grass]}
+large_crabgrass: {common_name: large crabgrass, scientific_name: Digitaria sanguinalis, type: grass, synonyms: [crabgrass, hairy crabgrass]}
 fall_panicum: {common_name: fall panicum, scientific_name: Panicum dichotomiflorum, type: grass, synonyms: []}
 shattercane: {common_name: shattercane, scientific_name: Sorghum bicolor, type: grass, synonyms: [wild cane]}
 woolly_cupgrass: {common_name: woolly cupgrass, scientific_name: Eriochloa villosa, type: grass, synonyms: []}
@@ -2307,13 +2515,14 @@ volunteer_corn: {common_name: volunteer corn, scientific_name: Zea mays, type: g
 canada_thistle: {common_name: Canada thistle, scientific_name: Cirsium arvense, type: broadleaf, synonyms: [creeping thistle]}
 dandelion: {common_name: dandelion, scientific_name: Taraxacum officinale, type: broadleaf, synonyms: [common dandelion]}
 common_milkweed: {common_name: common milkweed, scientific_name: Asclepias syriaca, type: broadleaf, synonyms: [milkweed]}
-wild_mustard: {common_name: wild mustard, scientific_name: Sinapis arvensis, type: broadleaf, synonyms: [charlock, mustard]}
-field_pennycress: {common_name: field pennycress, scientific_name: Thlaspi arvense, type: broadleaf, synonyms: [pennycress, fanweed]}
-henbit: {common_name: henbit, scientific_name: Lamium amplexicaule, type: broadleaf, synonyms: []}
+wild_mustard: {common_name: wild mustard, scientific_name: Sinapis arvensis, type: broadleaf, synonyms: [charlock, mustard, Brassica kaber]}
+field_pennycress: {common_name: field pennycress, scientific_name: Thlaspi arvense, type: broadleaf, synonyms: [pennycress, fanweed, stinkweed]}
+henbit: {common_name: henbit, scientific_name: Lamium amplexicaule, type: broadleaf, synonyms: [henbit deadnettle]}
 purple_deadnettle: {common_name: purple deadnettle, scientific_name: Lamium purpureum, type: broadleaf, synonyms: [red deadnettle]}
 common_chickweed: {common_name: common chickweed, scientific_name: Stellaria media, type: broadleaf, synonyms: [chickweed]}
 yellow_nutsedge: {common_name: yellow nutsedge, scientific_name: Cyperus esculentus, type: sedge, synonyms: [nutsedge, nutgrass]}
-quackgrass: {common_name: quackgrass, scientific_name: Elymus repens, type: grass, synonyms: [quack grass, couchgrass]}
+quackgrass: {common_name: quackgrass, scientific_name: Elymus repens, type: grass, synonyms: [couchgrass, Elytrigia repens, Agropyron repens]}
+field_horsetail: {common_name: field horsetail, scientific_name: Equisetum arvense, type: other, synonyms: [horsetail]}
 unidentified_broadleaf: {common_name: unidentified broadleaf, scientific_name: "", type: broadleaf, synonyms: []}
 unidentified_grass: {common_name: unidentified grass, scientific_name: "", type: grass, synonyms: []}
 ```
@@ -2330,6 +2539,8 @@ from pathlib import Path
 import yaml
 
 DEFAULT_PATH = Path(__file__).with_name("weeds.yaml")
+TYPES = {"broadleaf", "grass", "sedge", "other"}
+MAX_NAME_WORDS = 5
 
 
 @dataclass
@@ -2346,23 +2557,36 @@ class WeedInfo:
 
 
 def _norm(name: str) -> str:
-    return re.sub(r"[^a-z]+", " ", name.lower()).strip()
+    """Lowercase letters and single spaces; apostrophes vanish so lamb's-quarters == lambs quarters."""
+    return re.sub(r"[^a-z]+", " ", re.sub(r"['’]", "", str(name).lower())).strip()
 
 
 class WeedBook:
     def __init__(self, weeds: dict[str, WeedInfo]):
         self._weeds = weeds
-        self._names: dict[str, str] = {}
+        self._owners: dict[str, set[str]] = {}  # name with spaces removed -> species ids
         for weed in weeds.values():
             for name in (weed.id.replace("_", " "), weed.common_name, weed.scientific_name, *weed.synonyms):
-                key = _norm(name)
+                key = _norm(name).replace(" ", "")
                 if key:
-                    self._names.setdefault(key, weed.id)
+                    self._owners.setdefault(key, set()).add(weed.id)
 
     @classmethod
     def load(cls, path: Path = DEFAULT_PATH) -> "WeedBook":
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-        return cls({key: WeedInfo(id=key, **value) for key, value in raw.items()})
+        if not isinstance(raw, dict):
+            raise ValueError(f"{path}: expected a mapping of species id to entry")
+        weeds = {}
+        for key, value in raw.items():
+            try:
+                value = {k: ([] if v is None and k in ("synonyms", "sources") else v) for k, v in value.items()}
+                info = WeedInfo(id=key, **value)
+                if not (isinstance(info.synonyms, list) and isinstance(info.sources, list)):
+                    raise TypeError("synonyms and sources must be lists")
+                weeds[key] = info
+            except (TypeError, AttributeError) as error:
+                raise ValueError(f"{path}: entry '{key}': {error}") from error
+        return cls(weeds)
 
     def ids(self) -> list[str]:
         return list(self._weeds)
@@ -2371,26 +2595,54 @@ class WeedBook:
         return self._weeds[species_id]
 
     def __contains__(self, species_id: object) -> bool:
-        return species_id in self._weeds
+        return isinstance(species_id, str) and species_id in self._weeds
+
+    def _lookup(self, key: str) -> set[str]:
+        for form in (key, key[:-1] if key.endswith("s") else "", key[:-3] + "y" if key.endswith("ies") else ""):
+            if form in self._owners:
+                return self._owners[form]
+        return set()
 
     def resolve(self, name: str) -> str | None:
-        key = _norm(name or "")
-        return self._names.get(key) if key else None
+        """Species id for a model-written name, or None when unknown or ambiguous.
+
+        Ignores case, punctuation and plurals, and looks for the longest known names inside the phrase, so
+        "dandelion flower" and "waterhemp pigweed" resolve; "ragweed" or "giant or common ragweed" do not.
+        """
+        words = _norm(name if isinstance(name, str) else "").split()
+        spans: list[tuple[int, int, set[str]]] = []
+        for size in range(min(len(words), MAX_NAME_WORDS), 0, -1):
+            for start in range(len(words) - size + 1):
+                if any(a <= start and start + size <= b for a, b, _ in spans):
+                    continue  # inside a longer match
+                ids = self._lookup("".join(words[start:start + size]))
+                if ids:
+                    spans.append((start, start + size, ids))
+        found = set().union(*(ids for _, _, ids in spans))
+        return next(iter(found)) if len(found) == 1 else None
 
     def validate(self) -> list[str]:
-        """Every threshold or zero-tolerance flag must name its source."""
+        """Thresholds must be numbers and name their source; names must point at one species."""
         problems = []
         for weed in self._weeds.values():
+            if weed.type not in TYPES:
+                problems.append(f"{weed.id}: type {weed.type!r} not in {sorted(TYPES)}")
+            for label, value in (("action_density", weed.action_density), ("action_cover_pct", weed.action_cover_pct)):
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0):
+                    problems.append(f"{weed.id}: {label} must be a positive number, got {value!r}")
             claims = weed.zero_tolerance or weed.action_density is not None or weed.action_cover_pct is not None
-            if claims and not weed.sources:
+            if claims and not any(str(s).strip() for s in weed.sources):
                 problems.append(f"{weed.id}: threshold without a source")
+        for key, ids in self._owners.items():
+            if len(ids) > 1:
+                problems.append(f"name {key!r} belongs to several species: {sorted(ids)}")
         return problems
 ```
 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_weeds.py -v`
-Expected: 3 passed
+Expected: 26 passed
 
 - [ ] **Step 6: Commit**
 
@@ -2400,6 +2652,14 @@ git commit -m "feat: add weed book with names and synonyms"
 ```
 
 ### Task 15: Stop state
+
+Tasks 15–17 follow the boxes redesign (`docs/superpowers/specs/2026-10-30-boxes-redesign.md`). SAM text prompts don't find crop plants or weeds inside a crop canopy, so there are no "plant minus crop" candidates. Instead, Muse Spark draws a box around each crop row or plant and each weed, in 0–1000 coordinates, and SAM segments all of a call's boxes in one request (`SamClient.segment_boxes`, Task 7). This task holds the state for one stop:
+- Box conversion between the agent's 0–1000 coordinates and work-image pixels.
+- The weed check:
+  - A weed mask that lies mostly (≥ 60%) on separate crop plants is dropped.
+  - Row canopies never veto a weed, since a weed inside the row sits wholly in the canopy mask.
+  - Weeds that overlap any crop by more than 30%, and patches over 12% of the frame, are kept with `check_this`.
+- The in-row zone, and the overlay, where weeds win over crop.
 
 **Files:**
 - Create: `scout/agent/state.py`
@@ -2412,27 +2672,43 @@ Append to `tests/helpers.py`:
 ```python
 from scout.agronomy.weeds import WeedBook, WeedInfo
 from scout.retry import BadRequest
+from scout.vision import masks as mk
 from scout.vision.sam_parse import SamRecord
 
 
-def square_record(object_id, left, top, size, confidence=0.9):
-    return SamRecord(object_id, (left, top, left + size, top + size), confidence, np.ones((size, size), bool))
+def rect(left, top, right, bottom, size=(100, 100)):
+    mask = np.zeros((size[1], size[0]), bool)
+    mask[top:bottom, left:right] = True
+    return mask
+
+
+def mask_record(object_id, mask, confidence=0.9):
+    """A SAM record for a full-frame mask: its bounding box plus the box-local raster."""
+    left, top, right, bottom = mk.bbox(mask)
+    return SamRecord(object_id, (left, top, right, bottom), confidence, mask[top:bottom, left:right].copy())
 
 
 def field_scene():
-    """Concept answers for a 100x100 photo: one soybean plant, two weeds, empty sky."""
+    """What a 100x100 soybean photo really holds. Test boxes are 0-1000, so 10x these pixel numbers."""
     return {
-        "soybean plant": [square_record("0", 10, 10, 20)],
-        "plant": [square_record("0", 10, 10, 20), square_record("1", 60, 60, 10), square_record("2", 80, 10, 10)],
-        "sky": [],
+        "row": rect(10, 0, 30, 100),  # a crop row seen as one canopy, full height
+        "plant": rect(40, 30, 52, 42),  # one separate crop plant
+        "weed_a": rect(60, 60, 70, 70),
+        "weed_b": rect(80, 10, 90, 20),
+        "edge_weed": rect(26, 40, 36, 50),  # 40% of it inside the row canopy
+        "patch": rect(40, 75, 100, 100),  # 15% of the frame: a weed patch
     }
 
 
 class FakeSam:
-    def __init__(self, concepts=None, at=None, fail=None):
+    """Concept prompts answer from a dict. A box prompt returns the scene object that fills most of the box, cut to
+    the box as SAM does; a box over bare ground returns nothing."""
+
+    def __init__(self, scene=None, concepts=None, fail=None, confidence=0.9):
+        self.scene = field_scene() if scene is None else scene
         self.concepts = concepts or {}
-        self.at = at or []
         self.fail = fail or set()
+        self.confidence = confidence
         self.calls = []
 
     def segment_concept(self, image, phrase):
@@ -2441,9 +2717,18 @@ class FakeSam:
             raise BadRequest(f"rejected {phrase}")
         return list(self.concepts.get(phrase, []))
 
-    def segment_at(self, image, box=None, points=()):
-        self.calls.append(("at", box, tuple(points)))
-        return list(self.at)
+    def segment_boxes(self, image, boxes):
+        self.calls.append(("boxes", tuple(boxes)))
+        if "boxes" in self.fail:
+            raise BadRequest("rejected boxes")
+        records = []
+        for n, (left, top, right, bottom) in enumerate(boxes, start=1):
+            inside = {name: int(mask[top:bottom, left:right].sum()) for name, mask in self.scene.items()}
+            best = max(inside, key=inside.get, default=None)
+            if best is not None and inside[best]:
+                local = self.scene[best][top:bottom, left:right].copy()
+                records.append(SamRecord(str(n), (left, top, right, bottom), self.confidence, local))
+        return records
 
 
 def small_weedbook():
@@ -2463,36 +2748,94 @@ def small_weedbook():
 
 `tests/test_state.py`:
 ```python
-from scout.agent.state import StopState
-from tests.helpers import make_image, square_record
+import numpy as np
+import pytest
+
+from scout.agent.state import StopState, to_pixels, to_thousandths
+from tests.helpers import field_scene, make_image, rect
 
 
-def test_candidates_are_plants_minus_crop():
-    state = StopState(make_image(100, 100), "soybean")
-    state.add_records([square_record("0", 10, 10, 20)], "concept", "soybean plant", role="crop", kind="crop")
-    state.add_records([square_record("0", 10, 10, 20), square_record("1", 60, 60, 10), square_record("2", 80, 10, 10)],
-                      "concept", "plant", role="ignore", kind="all_plants")
-    candidates = state.refresh_candidates()
-    assert [c.box for c in candidates] == [(80, 10, 90, 20), (60, 60, 70, 70)]
-    assert [c.id for c in candidates] == ["s0-i5", "s0-i6"]
+def _state(crop="soybean"):
+    return StopState(make_image(100, 100), crop)
 
 
-def test_refresh_keeps_classified_and_replaces_unclassified():
-    state = StopState(make_image(100, 100), "soybean")
-    state.add_records([square_record("0", 60, 60, 10), square_record("1", 80, 10, 10)], "concept", "plant",
-                      role="ignore", kind="all_plants")
-    first = state.refresh_candidates()
-    first[0].role = "weed"
-    second = state.refresh_candidates()
-    assert len(second) == 1 and second[0].box == first[1].box
-    assert first[0].id in state.instances and first[1].id not in state.instances
+def test_boxes_convert_between_thousandths_and_pixels():
+    assert to_pixels([100, 200, 300, 400], (100, 50)) == (10, 10, 30, 20)
+    assert to_thousandths((10, 10, 30, 20), (100, 50)) == [100, 200, 300, 400]
+    assert to_pixels([300, 400, 100, 200], (100, 50)) == (10, 10, 30, 20)  # corners in either order
+    assert to_pixels([-50, 990, 1200, 1000], (100, 100)) == (0, 98, 100, 100)  # clamped, still 2 px tall
+    assert to_pixels([500.4, 500, 500, 500], (100, 100)) == (50, 50, 52, 52)  # grown to 2 px a side
+    with pytest.raises(ValueError):
+        to_pixels([1, 2, 3], (100, 100))
+
+
+def test_weed_on_a_crop_plant_is_dropped_but_weeds_in_a_row_canopy_are_flagged():
+    state, scene = _state(), field_scene()
+    state.add_mask(scene["row"], "prompt", "soybean row", role="crop")
+    state.add_mask(scene["plant"], "prompt", "soybean plant", role="crop")
+    assert state.add_weed(scene["plant"] & rect(42, 32, 50, 40), "prompt", "pigweed") is None
+    in_row = state.add_weed(scene["row"] & rect(12, 50, 22, 60), "prompt", "leaf in the row")
+    edge = state.add_weed(scene["edge_weed"], "prompt", "pigweed")
+    clear = state.add_weed(scene["weed_a"], "prompt", "waterhemp")
+    assert in_row.role == edge.role == clear.role == "weed" and edge.id_confidence is None
+    assert in_row.check_this and edge.check_this and not clear.check_this
+    assert edge.area_px == 100  # the whole mask is kept, including the part inside the row
+    assert state.unclassified() == [in_row.id, edge.id, clear.id] == ["s0-i3", "s0-i4", "s0-i5"]
+
+
+def test_large_weed_mask_is_kept_as_an_approximate_patch():
+    state = _state()
+    assert not state.count_approximate()
+    patch = state.add_weed(field_scene()["patch"], "prompt", "foxtail patch")
+    assert patch.role == "weed" and patch.check_this and state.is_patch(patch)
+    assert state.has_patch() and state.count_approximate()
+
+
+def test_row_band_from_a_row_canopy_leaves_out_sky():
+    state = _state()
+    assert state.row_band() is None  # no crop yet
+    state.add_mask(field_scene()["row"], "prompt", "soybean row", role="crop")
+    band = state.row_band()
+    assert band[50, 8] and band[50, 31] and not band[50, 40]
+    state.sky = rect(0, 0, 100, 20)
+    band = state.row_band()
+    assert not band[10, 20] and band[50, 20]
+
+
+def _plants_in_two_rows(state):
+    for x in (17, 67):
+        for y in (10, 40, 70):
+            state.add_mask(rect(x, y, x + 6, y + 6), "prompt", "soybean plant", role="crop")
+
+
+def test_row_band_fits_lines_through_separate_plants():
+    state = _state()
+    _plants_in_two_rows(state)
+    band = state.row_band()
+    assert band[50, 20] and band[50, 70] and not band[50, 45]
+
+
+def test_row_band_is_none_for_alfalfa():
+    state = _state("alfalfa")
+    _plants_in_two_rows(state)
+    state.add_mask(field_scene()["row"], "prompt", "alfalfa", role="crop")
+    assert state.row_band() is None
+
+
+def test_overlay_paints_weeds_over_crop():
+    state, scene = _state(), field_scene()
+    state.add_mask(scene["row"], "prompt", "soybean row", role="crop")
+    state.add_mask(scene["edge_weed"], "prompt", "pigweed", role="weed")
+    pixels = np.asarray(state.overlay())
+    # (45, 28) is in the row and the weed, (45, 31) only in the weed, (45, 20) only in the row; all are in the band
+    assert tuple(pixels[45, 28]) == tuple(pixels[45, 31]) != tuple(pixels[45, 20])
 
 
 def test_log_reports_steps():
     seen = []
     state = StopState(make_image(), "corn", on_step=seen.append, clock=lambda: 0.0)
-    state.log("segment", 'Segment "corn plant": 3 found', ["s0-i1"])
-    assert seen[0].summary.startswith("Segment") and seen[0].t_ms == 0
+    state.log("mark", "Mark crop: 2 of 2 boxes kept", ["s0-i1"])
+    assert seen[0].summary.startswith("Mark") and seen[0].t_ms == 0
 
 
 def test_overlay_renders_without_instances():
@@ -2508,26 +2851,59 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.agent.state'`
 
 `scout/agent/state.py`:
 ```python
-"""Everything known about one stop while the agent works on it."""
+"""Everything known about one stop while the agent works on it.
+
+The agent sees and gives boxes as [x1, y1, x2, y2] from 0 to 1000 on both axes (x from the left edge, y from the
+top). Code works in work-image pixels; to_pixels and to_thousandths convert between the two.
+"""
 import time
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 from PIL import Image
 
 from scout.app.ingest import StopImage
-from scout.models import AgentStep, Instance
+from scout.models import AgentStep, Box, Instance
 from scout.vision import masks as mk
 from scout.vision.overlay import render_overlay
-from scout.vision.rows import band_mask, fit_rows
-from scout.vision.sam_parse import SamRecord
+from scout.vision.rows import band_mask, canopy_band, fit_rows
 
-CANDIDATE_MIN_AREA_FRAC = 0.0005
+SCALE = 1000
+MIN_BOX_PX = 2
 LOW_SAM_CONFIDENCE = 0.5
+CANOPY_SPAN_FRAC = 1 / 3  # a crop mask this long (share of the image's long side) is a row canopy, not one plant
+MOSTLY_CROP = 0.6  # a weed mask this much on crop plants is a crop hit and is dropped
+CHECK_OVERLAP = 0.3  # a weed mask this much on any crop is kept but flagged for a closer look
+PATCH_FRAC = 0.12  # a weed mask over 12% of the frame is a patch of plants: kept as one, flagged, count approximate
+MAX_BOXES = 16  # SAM takes at most 16 objects per request
 
 
 class StopFailed(Exception):
     """The stop cannot continue (e.g. SAM rejected the same tool twice)."""
+
+
+def _span(a: float, b: float, extent: int) -> tuple[int, int]:
+    lo, hi = sorted((a * extent / SCALE, b * extent / SCALE))
+    lo = round(min(max(lo, 0.0), extent - MIN_BOX_PX))
+    hi = round(min(max(hi, lo + MIN_BOX_PX), extent))
+    return lo, hi
+
+
+def to_pixels(box: Sequence[float], size: tuple[int, int]) -> Box:
+    """A 0-1000 box from the agent -> work-image pixels: rounded, clamped to the image, at least 2 px a side."""
+    if len(box) != 4:
+        raise ValueError(f"a box is [x1, y1, x2, y2], got {list(box)}")
+    x1, y1, x2, y2 = (float(v) for v in box)
+    (left, right), (top, bottom) = _span(x1, x2, size[0]), _span(y1, y2, size[1])
+    return (left, top, right, bottom)
+
+
+def to_thousandths(box: Box, size: tuple[int, int]) -> list[int]:
+    """A work-image pixel box -> [x1, y1, x2, y2] from 0 to 1000, for the agent."""
+    width, height = size
+    left, top, right, bottom = box
+    return [round(left * SCALE / width), round(top * SCALE / height),
+            round(right * SCALE / width), round(bottom * SCALE / height)]
 
 
 class StopState:
@@ -2537,7 +2913,6 @@ class StopState:
         self.crop = crop
         self.instances: dict[str, Instance] = {}
         self.masks: dict[str, np.ndarray] = {}
-        self.kinds: dict[str, str] = {}
         self.sky: np.ndarray | None = None
         self.view_type: str | None = None
         self.crop_stage: str | None = None
@@ -2545,6 +2920,7 @@ class StopState:
         self.steps: list[AgentStep] = []
         self.calls = 0
         self.bad_requests: dict[str, int] = {}
+        self.box_cap_hit = False  # a weed mark used all 16 boxes, so the weed count is a floor
         self.finished = False
         self._next = 0
         self._on_step = on_step
@@ -2564,49 +2940,74 @@ class StopState:
         return step
 
     def add_mask(self, mask: np.ndarray, source: str, prompt: str, role: str = "unknown",
-                 confidence: float | None = None, kind: str | None = None) -> Instance:
+                 confidence: float | None = None) -> Instance:
         self._next += 1
         inst = Instance(id=f"s{self.image.index}-i{self._next}", source=source, prompt=prompt, box=mk.bbox(mask),
                         sam_confidence=confidence, area_px=int(mask.sum()), role=role,
                         check_this=confidence is not None and confidence < LOW_SAM_CONFIDENCE)
         self.instances[inst.id] = inst
         self.masks[inst.id] = mask
-        if kind:
-            self.kinds[inst.id] = kind
         return inst
-
-    def add_records(self, records: list[SamRecord], source: str, prompt: str, role: str = "unknown",
-                    kind: str | None = None) -> list[Instance]:
-        pairs = [(r, r.full_mask(self.size)) for r in records]
-        # A record that clips to nothing (off-image box, all-zero raster) would become a pixel-less "check this" flag.
-        return [self.add_mask(m, source, prompt, role, r.confidence, kind) for r, m in pairs if m.any()]
 
     def union_of(self, predicate: Callable[[Instance], bool]) -> np.ndarray:
         return mk.union([self.masks[i.id] for i in self.instances.values() if predicate(i)], self.size)
 
-    def refresh_candidates(self) -> list[Instance]:
-        """Weed candidates = all-plant masks minus crop and already-classified weeds, split into pieces."""
-        pool = self.union_of(lambda i: self.kinds.get(i.id) == "all_plants")
-        if not pool.any():
-            return []
-        for iid in [i.id for i in self.instances.values() if i.source == "candidate" and i.role == "unknown"]:
-            del self.instances[iid]
-            del self.masks[iid]
-        # Candidates the agent already ignored count as taken, so a refresh doesn't bring them back as unknown.
-        taken = self.union_of(lambda i: i.role in ("crop", "weed") or (i.source == "candidate" and i.role == "ignore"))
-        min_area = CANDIDATE_MIN_AREA_FRAC * self.size[0] * self.size[1]
-        return [self.add_mask(piece, "candidate", "plant minus crop") for piece in mk.pieces(pool, min_area, exclude=taken)]
+    def is_canopy(self, inst: Instance) -> bool:
+        """A crop mask spanning a third of the image's long side is a row canopy, not one plant."""
+        left, top, right, bottom = inst.box
+        return max(right - left, bottom - top) >= CANOPY_SPAN_FRAC * max(self.size)
+
+    def is_patch(self, inst: Instance) -> bool:
+        width, height = self.size
+        return inst.area_px > PATCH_FRAC * width * height
+
+    def add_weed(self, mask: np.ndarray, source: str, prompt: str, confidence: float | None = None) -> Instance | None:
+        """Register a weed mask, or return None when it mostly lies on crop plants (a box drawn on crop).
+
+        Only separate crop plants can veto a weed: a weed growing inside a row sits almost wholly in the row-canopy
+        mask, so canopy overlap only flags it. Weeds overlapping any crop, and large patches, get check_this.
+        """
+        area = max(int(mask.sum()), 1)
+        plants = self.union_of(lambda i: i.role == "crop" and not self.is_canopy(i))
+        if float((mask & plants).sum()) / area >= MOSTLY_CROP:
+            return None
+        crop = self.union_of(lambda i: i.role == "crop")
+        inst = self.add_mask(mask, source, prompt, role="weed", confidence=confidence)
+        on_crop = float((mask & crop).sum()) / area > CHECK_OVERLAP
+        inst.check_this = bool(inst.check_this or on_crop or self.is_patch(inst))
+        return inst
+
+    def unclassified(self) -> list[str]:
+        """Weeds that were marked but never classified."""
+        return [i.id for i in self.instances.values() if i.role == "weed" and i.id_confidence is None]
+
+    def has_patch(self) -> bool:
+        return any(i.role == "weed" and self.is_patch(i) for i in self.instances.values())
+
+    def count_approximate(self) -> bool:
+        """A patch counts as one weed, and a capped mark may have left weeds unmarked."""
+        return self.has_patch() or self.box_cap_hit
 
     def row_band(self) -> np.ndarray | None:
+        """In-row zone: none for alfalfa (solid-seeded) or without crop; the row canopies when any crop mask is
+        canopy-sized, else lines fitted through crop-plant centers. Sky is never in the band."""
         crops = [i for i in self.instances.values() if i.role == "crop"]
-        centers = [((i.box[0] + i.box[2]) / 2, (i.box[1] + i.box[3]) / 2) for i in crops]
-        widths = [((i.box[2] - i.box[0]) + (i.box[3] - i.box[1])) / 2 for i in crops]
-        fit = fit_rows(centers, widths)
-        return band_mask(fit, self.size) if fit else None
+        if self.crop == "alfalfa" or not crops:
+            return None
+        if any(self.is_canopy(i) for i in crops):
+            band = canopy_band(self.union_of(lambda i: i.role == "crop"))
+        else:
+            centers = [((i.box[0] + i.box[2]) / 2, (i.box[1] + i.box[3]) / 2) for i in crops]
+            widths = [((i.box[2] - i.box[0]) + (i.box[3] - i.box[1])) / 2 for i in crops]
+            fit = fit_rows(centers, widths)
+            band = band_mask(fit, self.size) if fit else None
+        if band is not None and self.sky is not None:
+            band = band & ~self.sky
+        return band
 
     def overlay(self) -> Image.Image:
-        crop = self.union_of(lambda i: i.role == "crop")
-        weed = self.union_of(lambda i: i.role == "weed") & ~crop
+        weed = self.union_of(lambda i: i.role == "weed")
+        crop = self.union_of(lambda i: i.role == "crop") & ~weed  # weeds win: a weed in the row keeps its pixels
         flagged = [i.box for i in self.instances.values() if i.role == "weed" and i.check_this]
         return render_overlay(self.image.work, crop, weed, self.row_band(), flagged)
 ```
@@ -2614,16 +3015,28 @@ class StopState:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_state.py -v`
-Expected: 4 passed
+Expected: 9 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add scout/agent/state.py tests/helpers.py tests/test_state.py
-git commit -m "feat: add stop state with weed candidates"
+git commit -m "feat: add stop state with 0-1000 boxes, weed check, and in-row zone"
 ```
 
 ### Task 16: Agent tools
+
+The six tools:
+- **`segment(phrase, kind)`:** one SAM concept prompt. It works for "crop row" (crop) and for distinct weeds such as "dandelion" or "flower" (weed).
+- **`mark(kind, boxes)`:** 1–16 `{box, label}` items, sent as one SAM request. The label becomes the instance's `prompt`.
+- **`zoom(instance_id | box)`**, **`classify(items)`**, **`measure(view_type)`** and **`finish(crop_stage, notes)`**.
+
+Every box the agent gives or gets is 0–1000. Weed masks from `segment` and `mark` both go through `StopState.add_weed`. The agent hears back, per box:
+- "box N: mostly crop" (dropped),
+- "box N: large patch; counted as one, approximate" (kept), or
+- "box N: nothing found".
+
+A weed `mark` that uses all 16 boxes makes the count approximate, since it is then a floor. `finish` refuses while marked weeds are unclassified and calls remain.
 
 **Files:**
 - Create: `scout/agent/tools.py`
@@ -2633,87 +3046,146 @@ git commit -m "feat: add stop state with weed candidates"
 
 `tests/test_tools.py`:
 ```python
+import base64
+import io
 import json
 
 import pytest
+from PIL import Image
 
 from scout.agent.state import StopFailed, StopState
 from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
-from tests.helpers import FakeSam, field_scene, make_image, small_weedbook
+from tests.helpers import FakeSam, field_scene, make_image, mask_record, rect, small_weedbook
+
+# Boxes as the agent gives them, 0-1000; the test photo is 100x100, so pixels are a tenth of these.
+ROW, PLANT = [100, 0, 300, 1000], [400, 300, 520, 420]
+WEED_A, WEED_B, EDGE = [600, 600, 700, 700], [800, 100, 900, 200], [260, 400, 360, 500]
+ON_PLANT, IN_ROW = [420, 320, 500, 400], [120, 500, 220, 600]
+PATCH, BARE = [400, 750, 1000, 1000], [400, 500, 500, 600]
 
 
 def _runner(sam=None, max_calls=12):
     state = StopState(make_image(100, 100), "soybean")
-    return ToolRunner(state, sam or FakeSam(field_scene()), small_weedbook(), max_calls=max_calls), state
+    return ToolRunner(state, sam or FakeSam(), small_weedbook(), max_calls=max_calls), state
 
 
-def _segment_both(runner):
-    runner.run("segment", {"phrase": "soybean plant", "kind": "crop"})
-    return runner.run("segment", {"phrase": "plant", "kind": "all_plants"})
+def _mark(runner, kind, *boxes):
+    items = [{"box": box, "label": f"{kind} {n}"} for n, box in enumerate(boxes, start=1)]
+    return json.loads(runner.run("mark", {"kind": kind, "boxes": items}).output)
 
 
 def test_schemas_name_six_tools():
-    assert [t["name"] for t in TOOL_SCHEMAS] == ["segment", "segment_at", "zoom", "classify", "measure", "finish"]
+    assert [t["name"] for t in TOOL_SCHEMAS] == ["segment", "mark", "zoom", "classify", "measure", "finish"]
 
 
-def test_segment_crop_then_plants_gives_candidates():
+def test_mark_sends_pixels_in_one_request_and_reports_thousandths():
+    sam = FakeSam()
+    runner, state = _runner(sam)
+    crop = _mark(runner, "crop", ROW, PLANT)
+    assert [f["box"] for f in crop["found"]] == [ROW, PLANT] and crop["notes"] == []
+    out = _mark(runner, "weed", WEED_A, WEED_B, EDGE, ON_PLANT, IN_ROW, PATCH, BARE)
+    assert sam.calls[-1] == ("boxes", ((60, 60, 70, 70), (80, 10, 90, 20), (26, 40, 36, 50), (42, 32, 50, 40),
+                                       (12, 50, 22, 60), (40, 75, 100, 100), (40, 50, 50, 60)))
+    assert [(f["box_no"], f["id"]) for f in out["found"]] == [(1, "s0-i3"), (2, "s0-i4"), (3, "s0-i5"), (5, "s0-i6"),
+                                                              (6, "s0-i7")]
+    assert out["found"][2]["box"] == EDGE and out["found"][2]["check_this"] is True
+    assert "check_this" not in out["found"][0] and out["found"][3]["check_this"] is True  # in the row: zoom on it
+    assert out["notes"] == ["box 4: mostly crop", "box 6: large patch; counted as one, approximate",
+                            "box 7: nothing found"]
+    assert state.instances["s0-i3"].prompt == "weed 1" and state.instances["s0-i3"].role == "weed"
+    assert state.steps[-1].summary == "Mark weed: 5 of 7 boxes kept"
+
+
+def test_segment_phrase_adds_crop_or_checked_weeds():
+    scene = field_scene()
+    sam = FakeSam(concepts={"crop row": [mask_record("0", scene["row"], 0.7)],
+                            "flower": [mask_record("0", scene["weed_b"]),
+                                       mask_record("1", scene["plant"] & rect(40, 30, 50, 40))]})
+    runner, state = _runner(sam)
+    _mark(runner, "crop", PLANT)
+    crop = json.loads(runner.run("segment", {"phrase": " crop row ", "kind": "crop"}).output)
+    assert crop["total_found"] == 1 and state.instances["s0-i2"].role == "crop"
+    weeds = json.loads(runner.run("segment", {"phrase": "flower", "kind": "weed"}).output)
+    assert weeds["total_found"] == 1 and weeds["notes"] == ["match 2: mostly crop"]
+    assert state.instances["s0-i3"].prompt == "flower"
+    assert state.steps[-1].summary == 'Segment "flower": 1 found, 1 dropped as crop'
+    assert runner.run("segment", {"phrase": "plant", "kind": "all_plants"}).output.startswith("error:")
+
+
+def test_mark_rejects_bad_boxes_before_calling_sam():
+    sam = FakeSam()
+    runner, _ = _runner(sam)
+    one = [{"box": WEED_A, "label": "w"}]
+    assert runner.run("mark", {"kind": "weed", "boxes": []}).output.startswith("error:")
+    assert runner.run("mark", {"kind": "weed", "boxes": one * 17}).output.startswith("error:")
+    assert runner.run("mark", {"kind": "weed", "boxes": [{"box": [1, 2, 3], "label": "w"}]}).output.startswith("error:")
+    assert runner.run("mark", {"kind": "weed", "boxes": [[600, 600, 700, 700]]}).output.startswith("error:")
+    assert runner.run("mark", {"kind": "plant", "boxes": one}).output.startswith("error:")
+    assert sam.calls == []
+
+
+def test_sixteen_weed_boxes_make_the_count_approximate():
     runner, state = _runner()
-    out = json.loads(_segment_both(runner).output)
-    assert out["total_found"] == 3
-    assert [c["id"] for c in out["weed_candidates"]] == ["s0-i5", "s0-i6"]
-    assert state.steps[-1].summary == 'Segment "plant": 3 found, 2 weed candidates'
+    _mark(runner, "weed", WEED_A, *[BARE] * 15)
+    assert state.box_cap_hit and len(state.unclassified()) == 1
+    metrics = json.loads(runner.run("measure", {"view_type": "close_up"}).output)
+    assert metrics["weed_count"] == 1 and metrics["count_approximate"] is True
 
 
 def test_classify_resolves_synonyms_and_rejects_unknown():
     runner, state = _runner()
-    _segment_both(runner)
-    ok = runner.run("classify", {"items": [{"instance_id": "s0-i6", "role": "weed", "species_id": "Marestail",
+    _mark(runner, "weed", WEED_A, WEED_B)
+    ok = runner.run("classify", {"items": [{"instance_id": "s0-i2", "role": "weed", "species_id": "Marestail",
                                             "height_in": 2.5, "leaf_count": 6, "id_confidence": "low"}]})
-    assert json.loads(ok.output) == {"ok": ["s0-i6"]}
-    inst = state.instances["s0-i6"]
+    assert json.loads(ok.output) == {"ok": ["s0-i2"]}
+    inst = state.instances["s0-i2"]
     assert inst.species_id == "horseweed" and inst.check_this is True
-    bad = runner.run("classify", {"items": [{"instance_id": "s0-i5", "role": "weed", "species_id": "dragonweed",
+    bad = runner.run("classify", {"items": [{"instance_id": "s0-i1", "role": "weed", "species_id": "dragonweed",
                                              "id_confidence": "high"}]})
-    assert bad.output.startswith("error:") and state.instances["s0-i5"].role == "unknown"
+    assert bad.output.startswith("error:") and state.instances["s0-i1"].id_confidence is None
 
 
-def test_zoom_returns_image():
-    runner, _ = _runner()
-    runner.run("segment", {"phrase": "soybean plant", "kind": "crop"})
+def test_zoom_on_an_instance_or_a_thousandths_box():
+    runner, state = _runner()
+    _mark(runner, "crop", ROW)
     result = runner.run("zoom", {"instance_id": "s0-i1"})
     assert result.images and result.images[0][1].startswith("data:image/jpeg;base64,")
-
-
-def test_segment_at_needs_box_or_points():
-    runner, _ = _runner()
-    assert runner.run("segment_at", {"kind": "weed"}).output.startswith("error:")
+    boxed = runner.run("zoom", {"box": [500, 500, 600, 600]})
+    close_up = Image.open(io.BytesIO(base64.b64decode(boxed.images[0][1].split(",", 1)[1])))
+    assert close_up.size == (12, 12)  # pixels (50, 50, 60, 60), padded by 15%
+    assert state.steps[-1].summary == "Zoom on box [500, 500, 600, 600]"
 
 
 def test_unknown_tool_and_bad_arguments():
     runner, _ = _runner()
     assert runner.run("explode", {}).output.startswith("error:")
+    assert runner.run("segment_at", {"kind": "weed", "box": WEED_A}).output.startswith("error:")  # not a tool
     assert runner.run("zoom", {"__invalid__": "{"}).output.startswith("error:")
     assert runner.run("measure", {"view": "row"}).output.startswith("error:")
 
 
-def test_measure_then_finish():
+def test_finish_needs_classified_weeds_and_measure():
     runner, state = _runner()
-    _segment_both(runner)
+    _mark(runner, "crop", ROW)
+    _mark(runner, "weed", WEED_A, WEED_B, EDGE)
     refused = runner.run("finish", {"crop_stage": None, "notes": ""})
-    assert refused.output.startswith("error:") and not refused.finished
+    assert refused.output.startswith("error:") and "s0-i2" in refused.output and not refused.finished
     runner.run("classify", {"items": [{"instance_id": i, "role": "weed", "species_id": None, "height_in": None,
-                                       "leaf_count": None, "id_confidence": "medium"} for i in ("s0-i5", "s0-i6")]})
+                                       "leaf_count": None, "id_confidence": "medium"}
+                                      for i in ("s0-i2", "s0-i3", "s0-i4")]})
+    assert runner.run("finish", {"crop_stage": None, "notes": ""}).output == "error: call measure first"
     metrics = json.loads(runner.run("measure", {"view_type": "row"}).output)
-    assert metrics["weed_count"] == 2
+    assert metrics["weed_count"] == 3 and metrics["in_row_weed_share"] > 0
     assert runner.run("finish", {"crop_stage": "V3", "notes": "ok"}).finished
     assert state.crop_stage == "V3" and state.finished
 
 
 def test_two_bad_requests_fail_the_stop():
-    runner, _ = _runner(FakeSam(field_scene(), fail={"plant"}))
-    assert runner.run("segment", {"phrase": "plant", "kind": "all_plants"}).output.startswith("error:")
+    runner, _ = _runner(FakeSam(fail={"boxes"}))
+    args = {"kind": "weed", "boxes": [{"box": WEED_A, "label": "w"}]}
+    assert runner.run("mark", args).output.startswith("error:")
     with pytest.raises(StopFailed):
-        runner.run("segment", {"phrase": "plant", "kind": "all_plants"})
+        runner.run("mark", args)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2725,22 +3197,26 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.agent.tools'`
 
 `scout/agent/tools.py`:
 ```python
-"""The six tools Muse Spark can call at a stop, and the code that runs them."""
+"""The six tools Muse Spark can call at a stop, and the code that runs them. Every box in or out is 0-1000."""
 import json
 from dataclasses import asdict, dataclass, field
 
-from scout.agent.state import StopFailed, StopState
+from scout.agent.state import MAX_BOXES, StopFailed, StopState, to_pixels, to_thousandths
 from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import to_data_url
 from scout.models import Instance
 from scout.retry import BadRequest
 from scout.vision import masks as mk
 from scout.vision.measure import compute_metrics
+from scout.vision.sam_parse import SamRecord
 
 VIEW_TYPES = ("row", "top_down", "close_up", "wide")
-SEGMENT_ROLES = {"crop": "crop", "all_plants": "ignore", "weed": "weed"}
-SEGMENT_AT_ROLES = {"crop": "crop", "weed": "weed", "unknown": "unknown"}
+KINDS = ("crop", "weed")
 ZOOM_MAX_PX = 768
+MAX_LISTED = 30
+NOTHING = "nothing found"
+MOSTLY_CROP_NOTE = "mostly crop"
+PATCH_NOTE = "large patch; counted as one, approximate"
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -2750,22 +3226,23 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
 
 
 _BOX = {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4,
-        "description": "[left, top, right, bottom] in photo pixels"}
+        "description": "[x1, y1, x2, y2] from 0 to 1000: x from the left edge, y from the top edge"}
 
 TOOL_SCHEMAS = [
-    _fn("segment", "Ask SAM 3.1 for every instance of one concept. Use a short noun phrase naming one thing.",
-        {"phrase": {"type": "string"},
-         "kind": {"type": "string", "enum": ["crop", "all_plants", "weed"],
-                  "description": "crop: the crop plants. all_plants: every plant; weed candidates are derived "
-                                 "from it minus crop. weed: a phrase you know names weeds, e.g. grass in soybean."}},
+    _fn("segment", "Ask SAM 3.1 for every instance of one concept, a short noun phrase. It finds \"crop row\" "
+        "(kind crop) and distinct things such as \"dandelion\" or \"flower\" (kind weed). It does not find crop "
+        "plants, leaves, or weeds in general: use mark for those.",
+        {"phrase": {"type": "string"}, "kind": {"type": "string", "enum": list(KINDS)}},
         ["phrase", "kind"]),
-    _fn("segment_at", "Segment one plant you can point at, with a box or with points.",
-        {"box": _BOX,
-         "points": {"type": "array", "items": {"type": "object", "properties": {
-             "x": {"type": "integer"}, "y": {"type": "integer"}, "positive": {"type": "boolean"}},
-             "required": ["x", "y", "positive"], "additionalProperties": False}},
-         "kind": {"type": "string", "enum": ["crop", "weed", "unknown"]}},
-        ["kind"]),
+    _fn("mark", "Segment plants you can see, one box per plant; all boxes go to SAM 3.1 in one request.",
+        {"kind": {"type": "string", "enum": list(KINDS),
+                  "description": "crop: boxes around crop rows or crop plants (one tall box per visible row is "
+                                 "fine). weed: a tight box around each weed, one per plant."},
+         "boxes": {"type": "array", "minItems": 1, "maxItems": MAX_BOXES, "items": {
+             "type": "object",
+             "properties": {"box": _BOX, "label": {"type": "string", "description": "What it is, in 2-3 words"}},
+             "required": ["box", "label"], "additionalProperties": False}}},
+        ["kind", "boxes"]),
     _fn("zoom", "Look closely at one instance or region. The close-up arrives in the next message.",
         {"instance_id": {"type": "string"}, "box": _BOX}, []),
     _fn("classify", "Record your verdict on one or more instances. Batch them.",
@@ -2820,46 +3297,77 @@ class ToolRunner:
 
     def _brief(self, inst: Instance) -> dict:
         width, height = self.state.size
-        out = {"id": inst.id, "box": list(inst.box), "area_pct": round(100 * inst.area_px / (width * height), 2)}
+        out = {"id": inst.id, "label": inst.prompt, "box": to_thousandths(inst.box, self.state.size),
+               "area_pct": round(100 * inst.area_px / (width * height), 2)}
         if inst.sam_confidence is not None:
             out["conf"] = round(inst.sam_confidence, 2)
+        if inst.check_this:
+            out["check_this"] = True
         return out
 
-    def _tool_segment(self, phrase: str, kind: str) -> ToolResult:
-        if kind not in SEGMENT_ROLES:
-            raise ValueError(f"kind must be one of {sorted(SEGMENT_ROLES)}")
-        records = self.sam.segment_concept(self.state.image, phrase)
-        added = self.state.add_records(records, "concept", phrase.strip(), role=SEGMENT_ROLES[kind], kind=kind)
-        candidates = self.state.refresh_candidates() if kind in ("crop", "all_plants") else []
-        summary = f'Segment "{phrase.strip()}": {len(added)} found'
-        if candidates:
-            summary += f", {len(candidates)} weed candidates"
-        self.state.log("segment", summary, [i.id for i in added])
-        return ToolResult(json.dumps({"total_found": len(added), "found": [self._brief(i) for i in added[:30]],
-                                      "weed_candidates": [self._brief(i) for i in candidates[:30]]}))
-
-    def _tool_segment_at(self, kind: str, box: list[int] | None = None, points: list[dict] | None = None) -> ToolResult:
-        if kind not in SEGMENT_AT_ROLES:
-            raise ValueError(f"kind must be one of {sorted(SEGMENT_AT_ROLES)}")
-        if not box and not points:
-            raise ValueError("give a box or at least one point")
-        point_list = [(p["x"], p["y"], p["positive"]) for p in points or []]
-        records = self.sam.segment_at(self.state.image, box=tuple(box) if box else None, points=point_list)
-        added = self.state.add_records(records[:1], "prompt", "box" if box else "point",
-                                       role=SEGMENT_AT_ROLES[kind], kind=kind)
+    def _add(self, record: SamRecord, kind: str, source: str, label: str) -> tuple[Instance | None, str | None]:
+        """One SAM record -> a crop or weed instance, plus a note for the agent when it was dropped or is a patch."""
+        mask = record.full_mask(self.state.size)
+        if not mask.any():
+            return None, NOTHING
         if kind == "crop":
-            self.state.refresh_candidates()
-        self.state.log("segment_at", f"Segment at a {'box' if box else 'point'}: {len(added)} found",
-                       [i.id for i in added])
-        return ToolResult(json.dumps({"found": [self._brief(i) for i in added]}))
+            return self.state.add_mask(mask, source, label, role="crop", confidence=record.confidence), None
+        inst = self.state.add_weed(mask, source, label, confidence=record.confidence)
+        if inst is None:
+            return None, MOSTLY_CROP_NOTE
+        return inst, PATCH_NOTE if self.state.is_patch(inst) else None
+
+    def _tool_segment(self, phrase: str, kind: str) -> ToolResult:
+        if kind not in KINDS:
+            raise ValueError(f"kind must be one of {list(KINDS)}")
+        phrase = str(phrase).strip()
+        if not phrase:
+            raise ValueError("phrase is empty")
+        found, notes = [], []
+        for n, record in enumerate(self.sam.segment_concept(self.state.image, phrase), start=1):
+            inst, note = self._add(record, kind, "concept", phrase)
+            if inst is not None:
+                found.append(inst)
+            if note and note != NOTHING:
+                notes.append(f"match {n}: {note}")
+        dropped = sum(note.endswith(MOSTLY_CROP_NOTE) for note in notes)
+        summary = f'Segment "{phrase}": {len(found)} found'
+        if dropped:
+            summary += f", {dropped} dropped as crop"
+        self.state.log("segment", summary, [i.id for i in found])
+        return ToolResult(json.dumps({"total_found": len(found), "found": [self._brief(i) for i in found[:MAX_LISTED]],
+                                      "notes": notes[:MAX_LISTED]}))
+
+    def _tool_mark(self, kind: str, boxes: list[dict]) -> ToolResult:
+        if kind not in KINDS:
+            raise ValueError(f"kind must be one of {list(KINDS)}")
+        if not isinstance(boxes, list) or not 1 <= len(boxes) <= MAX_BOXES:
+            raise ValueError(f"give 1 to {MAX_BOXES} boxes")
+        pixel_boxes = [to_pixels(item["box"], self.state.size) for item in boxes]
+        labels = [str(item.get("label") or kind).strip() for item in boxes]
+        records: dict[str, SamRecord] = {}
+        for record in self.sam.segment_boxes(self.state.image, pixel_boxes):
+            records.setdefault(record.object_id, record)  # object i + 1 is box i
+        found, notes = [], []
+        for n, label in enumerate(labels, start=1):
+            record = records.get(str(n))
+            inst, note = self._add(record, kind, "prompt", label) if record else (None, NOTHING)
+            if inst is not None:
+                found.append({"box_no": n, **self._brief(inst)})
+            if note:
+                notes.append(f"box {n}: {note}")
+        if kind == "weed" and len(boxes) == MAX_BOXES:
+            self.state.box_cap_hit = True  # more weeds may be out there: the count becomes a floor
+        self.state.log("mark", f"Mark {kind}: {len(found)} of {len(boxes)} boxes kept", [f["id"] for f in found])
+        return ToolResult(json.dumps({"found": found, "notes": notes}))
 
     def _tool_zoom(self, instance_id: str | None = None, box: list[int] | None = None) -> ToolResult:
         if instance_id:
             if instance_id not in self.state.instances:
                 raise ValueError(f"unknown instance {instance_id}")
-            region = self.state.instances[instance_id].box
+            region, label = self.state.instances[instance_id].box, instance_id
         elif box:
-            region = tuple(box)
+            region, label = to_pixels(box, self.state.size), f"box {list(box)}"
         else:
             raise ValueError("give instance_id or box")
         left, top, right, bottom = mk.pad_box(region, 0.15, self.state.size)
@@ -2868,7 +3376,6 @@ class ToolRunner:
         scale = self.state.image.full.width / self.state.image.work.width
         crop = self.state.image.full.crop(tuple(int(v * scale) for v in (left, top, right, bottom)))
         crop.thumbnail((ZOOM_MAX_PX, ZOOM_MAX_PX))
-        label = instance_id or f"box {list(region)}"
         self.state.log("zoom", f"Zoom on {label}", [instance_id] if instance_id else [])
         return ToolResult(f"The close-up of {label} follows in the next message.",
                           images=[(f"Close-up of {label}", to_data_url(crop))])
@@ -2915,14 +3422,16 @@ class ToolRunner:
             self.state.sky = mk.union([r.full_mask(self.state.size) for r in records], self.state.size)
         metrics = compute_metrics(list(self.state.instances.values()), self.state.masks, self.state.size,
                                   view_type, self.state.sky, self.state.row_band())
+        out = asdict(metrics)
+        out["count_approximate"] = metrics.count_approximate or self.state.count_approximate()
         self.state.log("measure", f"Measure: weed cover {metrics.weed_cover_pct}%, {metrics.weed_count} weeds")
-        return ToolResult(json.dumps(asdict(metrics)))
+        return ToolResult(json.dumps(out))
 
     def _tool_finish(self, crop_stage: str | None, notes: str) -> ToolResult:
-        unknown = [i.id for i in self.state.instances.values() if i.role == "unknown"]
-        if unknown and self.state.calls < self.max_calls:
-            self.state.log("finish", "Refused: unclassified candidates remain", ok=False)
-            return ToolResult(f"error: classify these first: {unknown[:20]}")
+        unclassified = self.state.unclassified()
+        if unclassified and self.state.calls < self.max_calls:
+            self.state.log("finish", "Refused: unclassified weeds remain", ok=False)
+            return ToolResult(f"error: classify these first: {unclassified[:20]}")
         if self.state.view_type is None:
             self.state.log("finish", "Refused: measure has not run", ok=False)
             return ToolResult("error: call measure first")
@@ -2936,16 +3445,24 @@ class ToolRunner:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_tools.py -v`
-Expected: 8 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add scout/agent/tools.py tests/test_tools.py
-git commit -m "feat: add the six stop-agent tools"
+git commit -m "feat: add the six stop-agent tools with box marking"
 ```
 
 ### Task 17: Prompts and the stop agent loop
+
+Muse Spark takes 13–16 s per turn, so the prompt aims for 6 turns or fewer within the 12-call budget:
+1. Mark the crop and the weeds in the first turn.
+2. Zoom on at most 2 doubtful instances, and mark missed weeds once more if needed.
+3. Classify every weed in one call.
+4. Measure, then finish.
+
+Within a turn, crop `mark`/`segment` calls run first, so the weed check sees the crop. Outputs still go back in the model's order. `run_stop` turns `StopFailed`, `BadRequest` and `LlmError` into a failed stop that keeps its step log. `finalize` keeps marked-but-unclassified weeds as weeds with `check_this`. An alfalfa stop needs no crop boxes to count, because alfalfa is solid-seeded.
 
 **Files:**
 - Create: `scout/agent/prompts.py`, `scout/agent/stop_agent.py`
@@ -2960,83 +3477,144 @@ from scout.agent.llm import LlmTurn
 
 
 class FakeLlm:
+    """Plays back turns in order; an exception in the list is raised in its place, like a failed API call."""
+
     def __init__(self, turns):
         self.turns = list(turns)
         self.requests = []
 
     def turn(self, input, **kwargs):
         self.requests.append({"input": input, **kwargs})
-        return self.turns.pop(0) if self.turns else LlmTurn(f"r-end{len(self.requests)}", [], "")
+        turn = self.turns.pop(0) if self.turns else LlmTurn(f"r-end{len(self.requests)}", [], "")
+        if isinstance(turn, Exception):
+            raise turn
+        return turn
 ```
 
 `tests/test_stop_agent.py`:
 ```python
 from dataclasses import replace
 
-from scout.agent.llm import LlmTurn, ToolCall
+from scout.agent.llm import LlmError, LlmTurn, ToolCall
+from scout.agent.prompts import stop_instructions
 from scout.agent.stop_agent import run_stop
 from scout.config import Settings
-from tests.helpers import FakeLlm, FakeSam, field_scene, make_image, small_weedbook
+from scout.retry import BadRequest
+from tests.helpers import FakeLlm, FakeSam, make_image, small_weedbook
 
 SETTINGS = Settings(api_key="test")
-SEGMENT_BOTH = [ToolCall("c1", "segment", {"phrase": "soybean plant", "kind": "crop"}),
-                ToolCall("c2", "segment", {"phrase": "plant", "kind": "all_plants"})]
+MARK_CROP = ToolCall("c1", "mark", {"kind": "crop", "boxes": [{"box": [100, 0, 300, 1000], "label": "soybean row"},
+                                                              {"box": [400, 300, 520, 420], "label": "soybean"}]})
+MARK_WEEDS = ToolCall("c2", "mark", {"kind": "weed", "boxes": [{"box": [600, 600, 700, 700], "label": "waterhemp"},
+                                                               {"box": [800, 100, 900, 200], "label": "marestail"},
+                                                               {"box": [420, 320, 500, 400], "label": "pigweed"}]})
+
+
+def _classify(*ids, species=None, confidence="medium"):
+    return ToolCall("c-cls", "classify", {"items": [
+        {"instance_id": i, "role": "weed", "species_id": species, "height_in": None, "leaf_count": None,
+         "id_confidence": confidence} for i in ids]})
+
+
+def _close(view_type="row"):
+    return [ToolCall("c-m", "measure", {"view_type": view_type}),
+            ToolCall("c-f", "finish", {"crop_stage": None, "notes": "done"})]
+
+
+def _run(llm, crop="soybean", settings=SETTINGS, sam=None, **kwargs):
+    return run_stop(make_image(100, 100), crop, llm, sam or FakeSam(), small_weedbook(), settings, **kwargs)
 
 
 def test_full_stop():
     llm = FakeLlm([
-        LlmTurn("r1", SEGMENT_BOTH, ""),
-        LlmTurn("r2", [ToolCall("c3", "zoom", {"instance_id": "s0-i6"})], ""),
+        LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""),
+        LlmTurn("r2", [ToolCall("c3", "zoom", {"instance_id": "s0-i4"})], ""),
         LlmTurn("r3", [ToolCall("c4", "classify", {"items": [
-            {"instance_id": "s0-i5", "role": "weed", "species_id": "waterhemp", "height_in": 3, "leaf_count": 5,
+            {"instance_id": "s0-i3", "role": "weed", "species_id": "waterhemp", "height_in": 3, "leaf_count": 5,
              "id_confidence": "high"},
-            {"instance_id": "s0-i6", "role": "weed", "species_id": "marestail", "height_in": None, "leaf_count": None,
+            {"instance_id": "s0-i4", "role": "weed", "species_id": "marestail", "height_in": None, "leaf_count": None,
              "id_confidence": "low"}]})], ""),
         LlmTurn("r4", [ToolCall("c5", "measure", {"view_type": "top_down"}),
                        ToolCall("c6", "finish", {"crop_stage": "V3", "notes": "Two weeds between rows."})], ""),
     ])
     steps = []
-    result, _ = run_stop(make_image(100, 100), "soybean", llm, FakeSam(field_scene()), small_weedbook(), SETTINGS,
-                         on_step=steps.append)
-    assert result.status == "ok" and result.weed_count == 2
+    result, _ = _run(llm, on_step=steps.append)
+    assert result.status == "ok" and result.weed_count == 2  # the pigweed box sat on a soybean plant
     assert result.species == {"waterhemp": 1, "horseweed": 1}
-    assert result.crop_stage == "V3" and result.view_type == "top_down"
-    assert result.density_per_m2 is not None
-    assert any("s0-i6" in flag for flag in result.flags)
-    assert len(steps) == len(result.steps) >= 6
-    third = llm.requests[2]
+    assert result.crop_stage == "V3" and result.view_type == "top_down" and result.density_per_m2 is not None
+    assert result.flags == ["Check s0-i4: low confidence"]
+    assert len(steps) == len(result.steps) == 6
+    first, third = llm.requests[0], llm.requests[2]
+    assert [t["name"] for t in first["tools"]][:2] == ["segment", "mark"] and "0 to 1000" in first["instructions"]
     assert third["previous_response_id"] == "r2"
     assert any(part.get("type") == "message" for part in third["input"])  # zoom image rides in a user message
 
 
-def test_call_limit_closes_stop_and_flags_leftovers():
-    llm = FakeLlm([LlmTurn("r1", SEGMENT_BOTH, ""),
-                   LlmTurn("r2", [ToolCall("c3", "zoom", {"instance_id": "s0-i5"})], "")])
-    result, _ = run_stop(make_image(100, 100), "soybean", llm, FakeSam(field_scene()), small_weedbook(),
-                         replace(SETTINGS, max_tool_calls=3))
+def test_crop_marks_run_first_within_a_turn():
+    llm = FakeLlm([LlmTurn("r1", [MARK_WEEDS, MARK_CROP], ""),
+                   LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close()], "")])
+    result, state = _run(llm)
+    assert [s.summary for s in result.steps[:2]] == ["Mark crop: 2 of 2 boxes kept", "Mark weed: 2 of 3 boxes kept"]
+    assert [p["call_id"] for p in llm.requests[1]["input"]] == ["c2", "c1"]  # outputs keep the model's order
+    assert result.status == "ok" and result.weed_count == 2 and state.instances["s0-i1"].role == "crop"
+
+
+def test_call_limit_closes_stop_and_flags_unclassified_weeds():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""),
+                   LlmTurn("r2", [ToolCall("c3", "zoom", {"instance_id": "s0-i3"})], "")])
+    result, _ = _run(llm, settings=replace(SETTINGS, max_tool_calls=3))
     assert result.status == "ok" and result.weed_count == 2
     assert any(step.tool == "limit" for step in result.steps)
-    assert len([f for f in result.flags if f.startswith("Check")]) == 2
+    assert result.flags == ["Check s0-i3: marked but never classified", "Check s0-i4: marked but never classified"]
 
 
-def test_repeated_bad_request_fails_stop():
-    call = [ToolCall("c1", "segment", {"phrase": "plant", "kind": "all_plants"})]
+def test_patch_makes_the_count_approximate():
+    patch = ToolCall("c2", "mark", {"kind": "weed", "boxes": [{"box": [400, 750, 1000, 1000], "label": "foxtail"}]})
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, patch], ""), LlmTurn("r2", [_classify("s0-i3"), *_close("close_up")], "")])
+    result, _ = _run(llm)
+    assert result.weed_count == 1 and result.count_approximate is True
+    assert "Weed count is approximate: some weeds merged into patches" in result.flags
+
+
+def test_repeated_bad_request_fails_stop_and_keeps_steps():
+    call = [ToolCall("c1", "mark", {"kind": "weed", "boxes": [{"box": [600, 600, 700, 700], "label": "w"}]})]
     llm = FakeLlm([LlmTurn("r1", call, ""), LlmTurn("r2", call, "")])
-    result, _ = run_stop(make_image(100, 100), "soybean", llm, FakeSam(field_scene(), fail={"plant"}),
-                         small_weedbook(), SETTINGS)
-    assert result.status == "failed"
+    result, _ = _run(llm, sam=FakeSam(fail={"boxes"}))
+    assert result.status == "failed" and [s.tool for s in result.steps] == ["mark", "mark", "error"]
+
+
+def test_model_errors_fail_the_stop_and_keep_steps():
+    for error in (LlmError("response r2 was incomplete"), BadRequest("image too large")):
+        result, _ = _run(FakeLlm([LlmTurn("r1", [MARK_CROP], ""), error]))
+        assert result.status == "failed" and [s.tool for s in result.steps] == ["mark", "error"]
 
 
 def test_prose_reply_is_nudged_then_closed():
     llm = FakeLlm([LlmTurn("r1", [], "I think there are weeds."), LlmTurn("r2", [], "Still prose.")])
-    result, _ = run_stop(make_image(100, 100), "soybean", llm, FakeSam(field_scene()), small_weedbook(), SETTINGS)
+    result, _ = _run(llm)
     assert result.status == "no_crop_found" and len(llm.requests) == 2
+
+
+def test_alfalfa_needs_no_crop_boxes():
+    weeds = ToolCall("c1", "mark", {"kind": "weed", "boxes": [{"box": [600, 600, 700, 700], "label": "dandelion"},
+                                                              {"box": [800, 100, 900, 200], "label": "dandelion"}]})
+    llm = FakeLlm([LlmTurn("r1", [weeds], ""), LlmTurn("r2", [_classify("s0-i1", "s0-i2"), *_close("close_up")], "")])
+    result, _ = _run(llm, crop="alfalfa")
+    assert result.status == "ok" and result.weed_count == 2 and result.in_row_weed_share is None
+
+
+def test_instructions_use_thousandths_and_crop_hints():
+    soybean = stop_instructions("soybean", ["waterhemp", "horseweed"], 12)
+    alfalfa = stop_instructions("alfalfa", ["dandelion"], 12)
+    assert "0 to 1000" in soybean and "waterhemp, horseweed" in soybean and "12 tool calls" in soybean
+    assert '"crop row"' in soybean and "crop boxes are optional" in alfalfa
+    assert "crop boxes are optional" not in soybean
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_stop_agent.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'scout.agent.stop_agent'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'scout.agent.prompts'`
 
 - [ ] **Step 3: Write the prompts**
 
@@ -3044,30 +3622,34 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.agent.stop_agen
 ```python
 """Instructions for the stop agent and the field explanation."""
 
-CROP_PHRASES = {"corn": "corn plant", "soybean": "soybean plant", "alfalfa": "alfalfa plant"}
 
+def stop_instructions(crop: str, species_ids: list[str], max_calls: int) -> str:
+    if crop == "alfalfa":
+        crop_boxes = "Alfalfa is solid-seeded, so crop boxes are optional."
+    else:
+        crop_boxes = (f"For the crop, box each visible {crop} row (one tall box per row is fine) or each {crop} "
+                      'plant. In a view along the rows, segment "crop row" with kind "crop" also works.')
+    return f"""You are an agronomist scouting a {crop} field. You see one photo. Find every weed, identify it, then \
+have code measure it.
 
-def stop_instructions(crop: str, size: tuple[int, int], species_ids: list[str], max_calls: int) -> str:
-    width, height = size
-    return f"""You are an agronomist scouting a {crop} field. You see one photo ({width}x{height} pixels; every \
-coordinate you give is in these pixels). Find every weed, identify it, then have code measure it.
+Coordinates: every box you give or get is [x1, y1, x2, y2] from 0 to 1000 on both axes. x runs from the left edge \
+(0) to the right edge (1000), and y from the top (0) to the bottom (1000).
 
-Procedure:
-1. segment the crop with kind "crop" (for example "{CROP_PHRASES[crop]}"). If nothing is found, try one other \
-phrase such as "{crop} seedling".
-2. segment "plant" with kind "all_plants". Pieces of plant that are not crop come back as weed_candidates.
-3. Review the candidates. Zoom on any you are unsure of. If you see a weed that no candidate covers, call \
-segment_at with a point on it and kind "weed". If a whole class of weeds is present (for example grass in \
-soybean), segment that phrase with kind "weed".
-4. classify every candidate, batching many items into one call. Use a species_id from this list only: \
-{", ".join(species_ids)}. Use null when you cannot tell. Give height_in and leaf_count when visible. Use role \
-"crop" for crop pieces and "ignore" for soil, residue, or shadows.
-5. measure with the view_type that fits: row (looking along rows), top_down (camera pointing straight down), \
-close_up (a few plants fill the frame), wide (field to the horizon).
-6. finish with the crop growth stage if you can tell (for example V3) and one sentence of notes.
+Procedure (aim for 6 turns or fewer):
+1. In your first turn, call mark with kind "crop" and mark with kind "weed"; both calls can go in the same turn. \
+{crop_boxes} For the weeds, give a tight box around every weed, one box per plant, nearest or largest first, at \
+most 16. A distinctive flowering weed can also be found by phrase: segment "dandelion" or "flower" with kind "weed".
+2. Read the results. Zoom on at most 2 doubtful instances (check_this is true). If you missed weeds, mark them \
+once more.
+3. classify every weed instance in one call. Use a species_id from this list only: {", ".join(species_ids)}. Use \
+null when you cannot tell. Give height_in and leaf_count when visible. Use role "crop" for an instance that is \
+really crop and "ignore" for soil, residue, or shadow.
+4. measure with the view_type that fits: row (looking along rows), top_down (camera pointing straight down), \
+close_up (a few plants fill the frame), wide (field to the horizon). Then finish with the crop growth stage if \
+you can tell (for example V3) and one sentence of notes. measure and finish can go in the same turn.
 
-Rules: never invent numbers; measurements come only from measure. You have at most {max_calls} tool calls. \
-Always respond with tool calls, not prose."""
+Rules: never invent numbers; measurements come only from measure. You have at most {max_calls} tool calls. Always \
+respond with tool calls, not prose. Every coordinate is 0 to 1000."""
 
 
 FIELD_INSTRUCTIONS = """You are an agronomist writing the reasoning for a field scouting report. You receive JSON \
@@ -3085,16 +3667,22 @@ example rotating herbicide groups). Use only numbers that appear in the JSON. Do
 import time
 from typing import Callable
 
-from scout.agent.llm import Llm, user_message
+from scout.agent.llm import Llm, LlmError, ToolCall, user_message
 from scout.agent.prompts import stop_instructions
 from scout.agent.state import StopFailed, StopState
 from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
 from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import StopImage
 from scout.config import Settings
-from scout.models import AgentStep, StopResult
+from scout.models import AgentStep, Instance, StopResult
+from scout.retry import BadRequest
 from scout.vision import masks as mk
 from scout.vision.measure import compute_metrics
+
+
+def crop_first(calls: list[ToolCall]) -> list[ToolCall]:
+    """Crop marks and segments run before the rest of a turn's calls, so the weed check sees the crop."""
+    return sorted(calls, key=lambda c: 0 if c.name in ("mark", "segment") and c.arguments.get("kind") == "crop" else 1)
 
 
 def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settings: Settings,
@@ -3102,10 +3690,9 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
              clock: Callable[[], float] = time.monotonic) -> tuple[StopResult, StopState]:
     state = StopState(image, crop, on_step=on_step, clock=clock)
     runner = ToolRunner(state, sam, weeds, max_calls=settings.max_tool_calls)
-    instructions = stop_instructions(crop, image.size, weeds.ids(), settings.max_tool_calls)
-    width, height = image.size
-    pending: list[dict] = [user_message(f"Stop {image.index + 1}: the photo is {width}x{height} pixels.",
-                                        [image.work_data_url])]
+    instructions = stop_instructions(crop, weeds.ids(), settings.max_tool_calls)
+    pending: list[dict] = [user_message(f"Stop {image.index + 1}: one photo of a {crop} field. Boxes are 0 to 1000 "
+                                        "on both axes.", [image.work_data_url])]
     previous = None
     nudged = False
     try:
@@ -3121,27 +3708,36 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
                 nudged = True
                 pending = [user_message("Call a tool. If you are done, call measure and then finish.")]
                 continue
-            pending, images = [], []
-            for call in turn.calls:
+            outputs, images = {}, []
+            for call in crop_first(turn.calls):
                 state.calls += 1
                 result = runner.run(call.name, call.arguments)
-                pending.append({"type": "function_call_output", "call_id": call.call_id, "output": result.output})
+                outputs[call.call_id] = result.output
                 images += result.images
+            pending = [{"type": "function_call_output", "call_id": call.call_id, "output": outputs[call.call_id]}
+                       for call in turn.calls]  # answered in the model's own order
             if images:
                 pending.append(user_message("Close-ups you asked for: " + "; ".join(c for c, _ in images),
                                             [url for _, url in images]))
-    except StopFailed as error:
-        state.log("error", str(error), ok=False)
+    except (StopFailed, BadRequest, LlmError) as error:
+        state.log("error", f"{type(error).__name__}: {error}", ok=False)
         return StopResult(stop_index=image.index, image_hash=image.hash, gps=image.gps, steps=state.steps,
                           flags=["This stop could not be analyzed"], status="failed"), state
     return finalize(state, sam), state
 
 
+def _flag(inst: Instance) -> str:
+    if inst.id_confidence is None:
+        return f"Check {inst.id}: marked but never classified"
+    if inst.id_confidence == "low":
+        return f"Check {inst.id}: low confidence"
+    return f"Check {inst.id}: may be crop or several plants"
+
+
 def finalize(state: StopState, sam) -> StopResult:
-    """Unclassified candidates count as unidentified weeds and are flagged; measurements are recomputed."""
+    """Weeds that were marked but never classified stay weeds, flagged; measurements are recomputed."""
     for inst in state.instances.values():
-        if inst.role == "unknown":
-            inst.role = "weed"
+        if inst.role == "weed" and inst.id_confidence is None:
             inst.check_this = True
     view = state.view_type or "row"
     if view in ("row", "wide") and state.sky is None:
@@ -3151,25 +3747,31 @@ def finalize(state: StopState, sam) -> StopResult:
         except Exception:  # sky removal is best effort; cover is then measured over the whole photo
             state.sky = None
     m = compute_metrics(list(state.instances.values()), state.masks, state.size, view, state.sky, state.row_band())
-    has_crop = any(i.role == "crop" for i in state.instances.values())
-    flags = [f"Check {i.id}: low confidence" for i in state.instances.values() if i.role == "weed" and i.check_this]
-    if m.count_approximate:
+    instances = list(state.instances.values())
+    flags = [_flag(i) for i in instances if i.role == "weed" and i.check_this]
+    if m.count_approximate or state.has_patch():
         flags.append("Weed count is approximate: some weeds merged into patches")
+    if state.box_cap_hit:
+        flags.append("Weed count is a floor: a mark call used all 16 boxes")
+    has_crop = any(i.role == "crop" for i in instances)
+    # Alfalfa is solid-seeded and its crop boxes are optional, so a worked alfalfa stop counts without them.
+    worked = state.view_type is not None or any(i.role == "weed" for i in instances)
     return StopResult(
         stop_index=state.image.index, image_hash=state.image.hash, view_type=view, gps=state.image.gps,
         crop_stage=state.crop_stage, weed_cover_pct=m.weed_cover_pct, crop_cover_pct=m.crop_cover_pct,
-        weed_count=m.weed_count, count_approximate=m.count_approximate, density_per_m2=m.density_per_m2,
-        in_row_weed_share=m.in_row_weed_share, species=m.species, species_cover_pct=m.species_cover_pct,
-        species_density=m.species_density, species_max_height_in=m.species_max_height_in,
-        max_height_in=m.max_height_in, flags=flags, notes=state.notes, steps=state.steps,
-        status="ok" if has_crop else "no_crop_found",
+        weed_count=m.weed_count, count_approximate=m.count_approximate or state.count_approximate(),
+        density_per_m2=m.density_per_m2, in_row_weed_share=m.in_row_weed_share, species=m.species,
+        species_cover_pct=m.species_cover_pct, species_density=m.species_density,
+        species_max_height_in=m.species_max_height_in, max_height_in=m.max_height_in, flags=flags,
+        notes=state.notes, steps=state.steps,
+        status="ok" if has_crop or (state.crop == "alfalfa" and worked) else "no_crop_found",
     )
 ```
 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_stop_agent.py -v`
-Expected: 4 passed
+Expected: 9 passed
 
 - [ ] **Step 6: Run the whole suite and commit**
 
@@ -3218,10 +3820,14 @@ def main() -> None:
     for photo in args.photos:
         stem = Path(photo).stem
         print(f"== {stem}")
-        image = load_image(0, Path(photo).read_bytes(), settings.full_max_px, settings.work_max_px)
-        result, state = run_stop(image, args.crop, llm, sam, weeds, settings,
-                                 on_step=lambda s: print(f"  [{s.tool}] {s.summary}"))
-        state.overlay().save(OUT / f"{stem}.png")
+        try:
+            image = load_image(0, Path(photo).read_bytes(), settings.full_max_px, settings.work_max_px)
+            result, state = run_stop(image, args.crop, llm, sam, weeds, settings,
+                                     on_step=lambda s: print(f"  [{s.tool}] {s.summary}"))
+            state.overlay().save(OUT / f"{stem}.png")
+        except Exception as error:  # an unreadable photo or a dropped connection must not end the batch
+            print(f"  !! {stem} failed: {type(error).__name__}: {error}")
+            continue
         (OUT / f"{stem}.json").write_text(result.model_dump_json(indent=1), encoding="utf-8")
         print(f"  -> {result.status}: cover {result.weed_cover_pct}%, {result.weed_count} weeds, "
               f"species {result.species}, flags {len(result.flags)}")
@@ -3239,14 +3845,14 @@ python scripts/run_stop.py --crop corn field-images/IMG_4214.JPG field-images/IM
 python scripts/run_stop.py --crop soybean field-images/IMG_4219.JPG field-images/IMG_4220.JPG field-images/3AEE1239-C89C-4BD5-905B-C2FCBC01E161.JPG
 python scripts/run_stop.py --crop alfalfa field-images/IMG_3922.JPG field-images/IMG_3926.JPG field-images/IMG_6942.HEIC
 ```
-Expected: each photo prints its steps and a summary line, and `run_out/` holds overlays and JSON.
+Expected: each photo prints its steps and a summary line, and `run_out/` holds overlays and JSON. A photo that fails prints `!!` and the batch moves on.
 
 - [ ] **Step 3: Tune**
 
 Open the overlays and look for three common problems:
-- **Crop marked as weed:** strengthen step 1 or add the crop phrase variant to `CROP_PHRASES`.
-- **Grass mats missed:** tell the agent to segment "grass" with kind "weed" when crop is corn or soybean.
-- **Too many calls:** reinforce batching in step 4.
+- **Weed boxes on crop:** boxes dropped as "mostly crop", and weeds flagged inside a row, are expected. Crop leaves still kept as weeds after zooming are not: tighten the weed wording in step 1 ("a tight box around the weed only").
+- **Weeds missed:** if visible weeds carry no box, stress "one box per plant, nearest or largest first" in step 1 and the second `mark` in step 2.
+- **Too many turns:** each turn takes 13–16 s. If stops use more than 6 turns, stress putting both marks in the first turn and measure + finish in the last.
 
 Change only `scout/agent/prompts.py`, then rerun the failing photos. Note the changes in `docs/spike-notes.md`.
 
@@ -3290,7 +3896,7 @@ Add each value's source. Species without a published number keep null; the 5% co
 - [ ] **Step 3: Verify and commit**
 
 Run: `python -m pytest tests/test_weeds.py -v`
-Expected: 3 passed (`validate()` returns `[]`)
+Expected: 26 passed (`validate()` returns `[]`)
 
 ```bash
 git add scout/agronomy/weeds.yaml
@@ -3321,11 +3927,12 @@ BOOK = WeedBook({
 })
 
 
-def _stop(i, species=None, cover=None, density=None, heights=None, status="ok"):
+def _stop(i, species=None, cover=None, density=None, heights=None, status="ok", approximate=False):
     species, cover = species or {}, cover or {}
     return StopResult(stop_index=i, image_hash=f"h{i}", species=species, species_cover_pct=cover,
                       species_density=density, species_max_height_in=heights or {},
-                      weed_cover_pct=sum(cover.values()), weed_count=sum(species.values()), status=status)
+                      weed_cover_pct=sum(cover.values()), weed_count=sum(species.values()), status=status,
+                      count_approximate=approximate)
 
 
 def test_zero_tolerance_species_triggers_spot_treatment():
@@ -3340,6 +3947,14 @@ def test_density_threshold_uses_top_down_stops():
     d = decide(stops, BOOK)
     assert d.summaries[0].mean_density_per_m2 == 2.0 and d.summaries[0].outcome == "treat"
     assert d.treat_mode == "broadcast"
+
+
+def test_approximate_count_also_grades_cover():
+    mat = [_stop(0, {"velvetleaf": 1}, {"velvetleaf": 40.0}, density={"velvetleaf": 0.5}, approximate=True)]
+    d = decide(mat, BOOK)
+    assert d.summaries[0].outcome == "treat" and "% cover" in d.rule_trace[0]
+    exact = [_stop(0, {"velvetleaf": 1}, {"velvetleaf": 40.0}, density={"velvetleaf": 0.5})]
+    assert decide(exact, BOOK).summaries[0].outcome == "no_action"
 
 
 def test_default_cover_threshold_gives_scout_again():
@@ -3401,23 +4016,29 @@ class Decision:
     rule_trace: list[str]
 
 
+def _grade(value: float, limit: float) -> Outcome:
+    if value >= limit:
+        return "treat"
+    return "scout_again" if value >= SCOUT_AGAIN_FACTOR * limit else "no_action"
+
+
 def _species_outcome(info: WeedInfo, present: int, n_ok: int, mean_cover: float,
-                     mean_density: float | None) -> tuple[Outcome, str]:
+                     mean_density: float | None, density_approx: bool = False) -> tuple[Outcome, str]:
+    """Grade density when it is known, else cover. When the count behind density is approximate (a mat of
+    plants segmented as one piece), cover is graded too and the more severe outcome wins."""
     name = info.common_name
     if info.zero_tolerance and present:
         return "treat", f"{name}: zero tolerance; present at {present} of {n_ok} stops -> treat"
+    if info.action_cover_pct is not None:
+        cover = (mean_cover, info.action_cover_pct, "% cover", "sourced threshold")
+    else:
+        cover = (mean_cover, DEFAULT_ACTION_COVER_PCT, "% cover", "tool default, not from a source")
+    checks = [cover]
     if info.action_density is not None and mean_density is not None:
-        value, limit, unit, source = mean_density, info.action_density, "plants/m²", "sourced threshold"
-    elif info.action_cover_pct is not None:
-        value, limit, unit, source = mean_cover, info.action_cover_pct, "% cover", "sourced threshold"
-    else:
-        value, limit, unit, source = mean_cover, DEFAULT_ACTION_COVER_PCT, "% cover", "tool default, not from a source"
-    if value >= limit:
-        outcome: Outcome = "treat"
-    elif value >= SCOUT_AGAIN_FACTOR * limit:
-        outcome = "scout_again"
-    else:
-        outcome = "no_action"
+        density = (mean_density, info.action_density, "plants/m²", "sourced threshold")
+        checks = [density, cover] if density_approx else [density]
+    value, limit, unit, source = max(checks, key=lambda check: SEVERITY[_grade(check[0], check[1])])
+    outcome = _grade(value, limit)
     return outcome, f"{name}: {value:g} {unit} vs threshold {limit:g} ({source}) -> {outcome.replace('_', ' ')}"
 
 
@@ -3434,7 +4055,8 @@ def decide(stops: list[StopResult], weeds: WeedBook) -> Decision:
         mean_density = (round(sum(s.species_density.get(sid, 0.0) for s in top_down) / len(top_down), 2)
                         if top_down else None)
         heights = [s.species_max_height_in[sid] for s in ok if sid in s.species_max_height_in]
-        outcome, line = _species_outcome(weeds.get(sid), present, n, mean_cover, mean_density)
+        approx = any(s.count_approximate and sid in s.species for s in top_down)
+        outcome, line = _species_outcome(weeds.get(sid), present, n, mean_cover, mean_density, approx)
         summaries.append(SpeciesSummary(species_id=sid, stops_present=present, frequency=round(present / n, 2),
                                         mean_cover_pct=mean_cover, mean_density_per_m2=mean_density,
                                         max_height_in=max(heights) if heights else None, outcome=outcome))
@@ -3467,7 +4089,7 @@ def urgency(max_height_in: float | None, options: list[LabelOption]) -> str | No
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_rules.py -v`
-Expected: 5 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Commit**
 
@@ -5201,15 +5823,15 @@ Upload the photos from one walk through one field. A Muse Spark agent drives SAM
 **Built during the Meta Global AI Developer Hackathon (Oct 30 – Nov 4, 2026).** Everything in this repository was written during the event. Earlier projects by the author ([Kronia](https://github.com/AjjayK/Kronia-Pesticide-LLM) and [sf-epa-data-ingestion](https://github.com/AjjayK/sf-epa-data-ingestion)) inspired the label idea; no code was reused.
 
 ## How it works
-1. **Segment.** Muse Spark asks SAM 3.1 for the crop ("soybean plant") and for all plants ("plant"). Plant minus crop gives weed candidates.
-2. **Check.** The agent zooms into doubtful candidates, re-prompts SAM with points, and names each weed and its size.
+1. **Mark.** Muse Spark boxes the crop rows and every weed, and SAM 3.1 segments all the boxes in one request. Code drops "weeds" that lie mostly on crop plants.
+2. **Check.** The agent zooms into doubtful plants, and names each weed and its size.
 3. **Measure.** Code computes weed cover, counts, density (straight-down shots), and in-row vs between-row share. The model never writes a number.
 4. **Decide.** Rules compare species against sourced thresholds (zero tolerance for resistant amaranths), and choose no action, scout again, or treat (spot or broadcast).
 5. **Ground in labels.** A table built from EPA label PDFs (each record's quote verified on its page) lists products labeled for this crop, weed, and size.
 
 ## Meta models used
 - `muse-spark-1.3`: agent tool loop, zoom inspection, label extraction to structured JSON, field explanation.
-- `sam-3.1`: concept prompts, point and box prompts, confidence scores.
+- `sam-3.1`: multi-object box prompts, concept prompts ("sky", "crop row", distinct weeds), confidence scores.
 
 ## Run locally
     python -m venv .venv && source .venv/Scripts/activate
@@ -5323,8 +5945,17 @@ def main() -> None:
     with open(HERE / "labels.csv", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     for row in rows:
-        image = load_image(0, (ROOT / row["photo"]).read_bytes(), settings.full_max_px, settings.work_max_px)
-        result, _ = run_stop(image, row["crop"], llm, sam, weeds, settings)
+        row.update(status="failed", pred_weeds_present="", pred_main_species="", pred_cover_bucket="")
+        try:
+            image = load_image(0, (ROOT / row["photo"]).read_bytes(), settings.full_max_px, settings.work_max_px)
+            result, _ = run_stop(image, row["crop"], llm, sam, weeds, settings)
+        except Exception as error:  # an unreadable photo or a dropped connection must not end the run
+            print(f"{row['photo']}: failed ({type(error).__name__}: {error})")
+            continue
+        row["status"] = result.status
+        if result.status == "failed":
+            print(f"{row['photo']}: failed (the stop could not be analyzed)")
+            continue
         covers = result.species_cover_pct
         row["pred_weeds_present"] = "y" if result.weed_count else "n"
         row["pred_main_species"] = max(covers, key=covers.get) if covers else ""
@@ -5334,7 +5965,7 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    print(score(rows))
+    print(score([row for row in rows if row["status"] != "failed"]))
 
 
 if __name__ == "__main__":
@@ -5354,7 +5985,7 @@ photo,crop,weeds_present,main_species,cover_bucket
 field-images/IMG_4215.JPG,corn,y,giant_foxtail,2-10
 ```
 Add ~15 rows, then run: `python -m evaluation.run_eval`
-Expected: one line per photo, then a dict of agreement rates. Use misses to tune `prompts.py`, rerun, and note the final numbers in `docs/spike-notes.md`.
+Expected: one line per photo, then a dict of agreement rates. Failed photos print a reason and are left out of the rates. Use misses to tune `prompts.py`, rerun, and note the final numbers in `docs/spike-notes.md`.
 
 - [ ] **Step 6: Commit**
 
@@ -5375,8 +6006,8 @@ git commit -m "feat: add agreement check against hand labels"
 # Demo video (3:00)
 
 0:00–0:20  Problem: scouting means walking a field, counting weeds per stop, and matching products to labels by hand.
-0:20–1:20  Live: upload a 6-photo soybean walk on the deployed URL. Agent steps stream: segment crop, segment
-           plants, zoom on a doubtful plant, identify waterhemp ~3 in, measure.
+0:20–1:20  Live: upload a 6-photo soybean walk on the deployed URL. Agent steps stream: mark crop, mark
+           weeds, zoom on a doubtful plant, identify waterhemp ~3 in, measure.
 1:20–2:10  Report: overlays (crop green, weeds magenta), cover/density/frequency cards, decision "Treat (spot)",
            rule trace, label options; click "p. N" to open the EPA label at the cited page.
 2:10–2:45  Under the hood: Muse Spark <-> SAM 3.1 loop (concept prompts, point prompts, confidence); code computes
