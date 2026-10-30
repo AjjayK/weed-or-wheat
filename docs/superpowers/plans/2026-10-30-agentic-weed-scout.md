@@ -473,11 +473,22 @@ def test_retries_transient_then_succeeds():
     def fn():
         calls.append(1)
         if len(calls) < 3:
-            raise StatusError(429)
+            raise StatusError(503)
         return "ok"
 
     assert with_retry(fn, sleep=sleeps.append) == "ok"
     assert sleeps == [1, 2]
+
+
+def test_rate_limit_waits_four_times_longer():
+    sleeps = []
+
+    def fn():
+        raise StatusError(429)
+
+    with pytest.raises(StatusError):
+        with_retry(fn, retries=2, sleep=sleeps.append)
+    assert sleeps == [4, 8]
 
 
 @pytest.mark.parametrize("status", [400, 413, 422])
@@ -571,14 +582,14 @@ def with_retry(fn: Callable[[], T], retries: int = 3, sleep: Callable[[float], N
             transient = status in RETRY_STATUS or type(error).__name__ in TRANSIENT_ERRORS
             if not transient or attempt == retries:
                 raise
-            sleep(2 ** attempt)
+            sleep(2 ** attempt * (4 if status == 429 else 1))  # rate limits clear slowly when 4 stops run at once
     raise AssertionError("unreachable")
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_retry.py -v`
-Expected: 9 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Commit**
 
@@ -2659,6 +2670,8 @@ Tasks 15–17 follow the boxes redesign (`docs/superpowers/specs/2026-10-30-boxe
   - A weed mask that lies mostly (≥ 60%) on separate crop plants is dropped.
   - Row canopies never veto a weed, since a weed inside the row sits wholly in the canopy mask.
   - Weeds that overlap any crop by more than 30%, and patches over 12% of the frame, are kept with `check_this`.
+- A patch makes the count approximate, except in a close-up, where a big weed is just a big plant.
+- Sky for row and wide views (`ensure_sky`): asked once and best effort. Without it, cover is measured over the whole photo.
 - The in-row zone, and the overlay, where weeds win over crop.
 
 **Files:**
@@ -2752,7 +2765,7 @@ import numpy as np
 import pytest
 
 from scout.agent.state import StopState, to_pixels, to_thousandths
-from tests.helpers import field_scene, make_image, rect
+from tests.helpers import field_scene, make_image, mask_record, rect
 
 
 def _state(crop="soybean"):
@@ -2840,6 +2853,42 @@ def test_log_reports_steps():
 
 def test_overlay_renders_without_instances():
     assert StopState(make_image(40, 30), "corn").overlay().size == (40, 30)
+
+
+def test_patch_is_approximate_except_in_a_close_up():
+    state = _state()
+    state.add_weed(field_scene()["patch"], "prompt", "foxtail patch")
+    assert state.count_approximate() and state.count_approximate("row") and state.count_approximate("top_down")
+    assert not state.count_approximate("close_up")  # a few big plants fill a close-up
+    state.box_cap_hit = True
+    assert state.count_approximate("close_up")  # a floor, whatever the view
+
+
+class _SkySam:
+    def __init__(self, records=None, error=None):
+        self.records, self.error, self.calls = records or [], error, 0
+
+    def segment_concept(self, image, phrase):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.records
+
+
+def test_ensure_sky_asks_once():
+    state, sam = _state(), _SkySam([mask_record("0", rect(0, 0, 100, 20))])
+    state.ensure_sky(sam)
+    state.ensure_sky(sam)
+    assert sam.calls == 1 and state.sky[10, 50] and not state.sky[50, 50] and state.steps == []
+
+
+def test_ensure_sky_is_best_effort_and_not_retried():
+    state, sam = _state(), _SkySam(error=TimeoutError("timed out"))
+    state.ensure_sky(sam)
+    state.ensure_sky(sam)
+    assert sam.calls == 1 and state.sky is None
+    assert [(s.tool, s.ok) for s in state.steps] == [("sky", False)]
+    assert "TimeoutError" in state.steps[0].summary
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2914,6 +2963,7 @@ class StopState:
         self.instances: dict[str, Instance] = {}
         self.masks: dict[str, np.ndarray] = {}
         self.sky: np.ndarray | None = None
+        self._sky_tried = False
         self.view_type: str | None = None
         self.crop_stage: str | None = None
         self.notes = ""
@@ -2984,9 +3034,22 @@ class StopState:
     def has_patch(self) -> bool:
         return any(i.role == "weed" and self.is_patch(i) for i in self.instances.values())
 
-    def count_approximate(self) -> bool:
-        """A patch counts as one weed, and a capped mark may have left weeds unmarked."""
-        return self.has_patch() or self.box_cap_hit
+    def count_approximate(self, view_type: str | None = None) -> bool:
+        """A patch counts as one weed (but a big plant in a close-up is just a plant), and a capped mark may have
+        left weeds unmarked."""
+        return (self.has_patch() and view_type != "close_up") or self.box_cap_hit
+
+    def ensure_sky(self, sam) -> None:
+        """Sky for row and wide views, asked once. Best effort: without it, cover is measured over the whole photo."""
+        if self.sky is not None or self._sky_tried:
+            return
+        self._sky_tried = True
+        try:
+            records = sam.segment_concept(self.image, "sky")
+        except Exception as error:
+            self.log("sky", f"Sky not found ({type(error).__name__}); cover uses the whole photo", ok=False)
+            return
+        self.sky = mk.union([r.full_mask(self.size) for r in records], self.size)
 
     def row_band(self) -> np.ndarray | None:
         """In-row zone: none for alfalfa (solid-seeded) or without crop; the row canopies when any crop mask is
@@ -3015,7 +3078,7 @@ class StopState:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_state.py -v`
-Expected: 9 passed
+Expected: 12 passed
 
 - [ ] **Step 5: Commit**
 
@@ -3027,7 +3090,7 @@ git commit -m "feat: add stop state with 0-1000 boxes, weed check, and in-row zo
 ### Task 16: Agent tools
 
 The six tools:
-- **`segment(phrase, kind)`:** one SAM concept prompt. It works for "crop row" (crop) and for distinct weeds such as "dandelion" or "flower" (weed).
+- **`segment(phrase, kind)`:** one SAM concept prompt. It works for "crop row" (crop) and for distinct weeds such as "dandelion" or "yellow flower" (weed). A bare "flower" would match alfalfa blossoms.
 - **`mark(kind, boxes)`:** 1–16 `{box, label}` items, sent as one SAM request. The label becomes the instance's `prompt`.
 - **`zoom(instance_id | box)`**, **`classify(items)`**, **`measure(view_type)`** and **`finish(crop_stage, notes)`**.
 
@@ -3037,6 +3100,8 @@ Every box the agent gives or gets is 0–1000. Weed masks from `segment` and `ma
 - "box N: nothing found".
 
 A weed `mark` that uses all 16 boxes makes the count approximate, since it is then a floor. `finish` refuses while marked weeds are unclassified and calls remain.
+
+`classify` checks every item before it changes any: numbers may arrive as `3` or `"3"`, and a species counts only for a weed (a crop item labelled "soybean" is fine). A confident verdict clears the canopy and low-SAM `check_this` flag; patches stay flagged.
 
 **Files:**
 - Create: `scout/agent/tools.py`
@@ -3055,6 +3120,7 @@ from PIL import Image
 
 from scout.agent.state import StopFailed, StopState
 from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
+from scout.vision.sam_parse import SamRecord
 from tests.helpers import FakeSam, field_scene, make_image, mask_record, rect, small_weedbook
 
 # Boxes as the agent gives them, 0-1000; the test photo is 100x100, so pixels are a tenth of these.
@@ -3099,16 +3165,16 @@ def test_mark_sends_pixels_in_one_request_and_reports_thousandths():
 def test_segment_phrase_adds_crop_or_checked_weeds():
     scene = field_scene()
     sam = FakeSam(concepts={"crop row": [mask_record("0", scene["row"], 0.7)],
-                            "flower": [mask_record("0", scene["weed_b"]),
+                            "yellow flower": [mask_record("0", scene["weed_b"]),
                                        mask_record("1", scene["plant"] & rect(40, 30, 50, 40))]})
     runner, state = _runner(sam)
     _mark(runner, "crop", PLANT)
     crop = json.loads(runner.run("segment", {"phrase": " crop row ", "kind": "crop"}).output)
     assert crop["total_found"] == 1 and state.instances["s0-i2"].role == "crop"
-    weeds = json.loads(runner.run("segment", {"phrase": "flower", "kind": "weed"}).output)
+    weeds = json.loads(runner.run("segment", {"phrase": "yellow flower", "kind": "weed"}).output)
     assert weeds["total_found"] == 1 and weeds["notes"] == ["match 2: mostly crop"]
-    assert state.instances["s0-i3"].prompt == "flower"
-    assert state.steps[-1].summary == 'Segment "flower": 1 found, 1 dropped as crop'
+    assert state.instances["s0-i3"].prompt == "yellow flower"
+    assert state.steps[-1].summary == 'Segment "yellow flower": 1 found, 1 dropped as crop'
     assert runner.run("segment", {"phrase": "plant", "kind": "all_plants"}).output.startswith("error:")
 
 
@@ -3143,6 +3209,82 @@ def test_classify_resolves_synonyms_and_rejects_unknown():
     bad = runner.run("classify", {"items": [{"instance_id": "s0-i1", "role": "weed", "species_id": "dragonweed",
                                              "id_confidence": "high"}]})
     assert bad.output.startswith("error:") and state.instances["s0-i1"].id_confidence is None
+
+
+def _verdict(instance_id, role="weed", species=None, confidence="medium", **extra):
+    return {"instance_id": instance_id, "role": role, "species_id": species, "height_in": None, "leaf_count": None,
+            "id_confidence": confidence, **extra}
+
+
+def test_classify_coerces_numbers_and_ignores_crop_names():
+    runner, state = _runner()
+    _mark(runner, "crop", PLANT)
+    _mark(runner, "weed", WEED_A, WEED_B)  # s0-i1 is the crop plant; s0-i2 and s0-i3 are weeds
+    ok = runner.run("classify", {"items": [
+        _verdict("s0-i2", species="", confidence="high", height_in="3", leaf_count="4.0"),
+        _verdict("s0-i1", role="crop", species="soybean", confidence="high"),  # a crop's name is not a weed species
+        _verdict("s0-i3", species="Marestail", height_in=2.5, leaf_count=6)]})
+    assert json.loads(ok.output) == {"ok": ["s0-i2", "s0-i1", "s0-i3"]}
+    weed, crop, other = (state.instances[i] for i in ("s0-i2", "s0-i1", "s0-i3"))
+    assert (weed.height_in, weed.leaf_count, weed.species_id) == (3.0, 4, None)
+    assert (crop.role, crop.species_id) == ("crop", None)
+    assert (other.species_id, other.height_in, other.leaf_count) == ("horseweed", 2.5, 6)
+
+
+def test_classify_rejects_bad_values_before_changing_anything():
+    runner, state = _runner()
+    _mark(runner, "weed", WEED_A, WEED_B)
+    good = _verdict("s0-i1", species="waterhemp", confidence="high", height_in=3)
+    for bad in ({"height_in": "tall"}, {"height_in": -2}, {"height_in": "nan"}, {"height_in": True},
+                {"leaf_count": "many"}, {"leaf_count": [3]}, {"id_confidence": "sure"}, {"role": "tree"}):
+        out = runner.run("classify", {"items": [good, _verdict("s0-i2", **bad)]})
+        assert out.output.startswith("error:"), bad
+        assert all(i.id_confidence is None and i.height_in is None for i in state.instances.values()), bad
+
+
+def test_a_confident_verdict_clears_the_check_flag_but_patches_stay_flagged():
+    runner, state = _runner()
+    _mark(runner, "crop", ROW)
+    _mark(runner, "weed", EDGE, WEED_A, PATCH)  # s0-i2 sits partly in the row canopy, s0-i4 is a patch
+    assert [state.instances[i].check_this for i in ("s0-i2", "s0-i3", "s0-i4")] == [True, False, True]
+    runner.run("classify", {"items": [_verdict("s0-i2", confidence="high"), _verdict("s0-i3", confidence="low"),
+                                      _verdict("s0-i4", confidence="high")]})
+    assert [state.instances[i].check_this for i in ("s0-i2", "s0-i3", "s0-i4")] == [False, True, True]
+
+
+def test_finish_tidies_stage_and_notes():
+    runner, state = _runner()
+    runner.run("measure", {"view_type": "close_up"})
+    assert runner.run("finish", {"crop_stage": " V3 ", "notes": None}).finished
+    assert (state.crop_stage, state.notes) == ("V3", "")
+    assert runner.run("finish", {"crop_stage": "  ", "notes": 7}).finished
+    assert (state.crop_stage, state.notes) == (None, "7")
+
+
+class _ZeroBasedSam(FakeSam):
+    """Numbers its objects from 0, though the first box's object should be 1."""
+
+    def segment_boxes(self, image, boxes):
+        return [SamRecord(str(int(r.object_id) - 1), r.box, r.confidence, r.mask)
+                for r in super().segment_boxes(image, boxes)]
+
+
+def test_mark_logs_object_ids_sam_was_not_asked_for():
+    runner, state = _runner(_ZeroBasedSam())
+    _mark(runner, "weed", WEED_A, WEED_B)
+    odd = [s for s in state.steps if s.tool == "mark" and not s.ok]
+    assert [s.summary for s in odd] == ["SAM returned unexpected object ids ['0']"]
+    runner, state = _runner()  # ids 1..N, as asked: nothing to log
+    _mark(runner, "weed", WEED_A, WEED_B)
+    assert all(s.ok for s in state.steps)
+
+
+def test_segment_lists_up_to_a_hundred_matches():
+    cells = [(n % 10 * 10, n // 10 * 10) for n in range(100)]
+    matches = [mask_record(str(n), rect(x, y, x + 4, y + 4)) for n, (x, y) in enumerate(cells)]
+    runner, _ = _runner(FakeSam(concepts={"dandelion": matches}))
+    out = json.loads(runner.run("segment", {"phrase": "dandelion", "kind": "weed"}).output)
+    assert out["total_found"] == 100 and len(out["found"]) == 100
 
 
 def test_zoom_on_an_instance_or_a_thousandths_box():
@@ -3199,6 +3341,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.agent.tools'`
 ```python
 """The six tools Muse Spark can call at a stop, and the code that runs them. Every box in or out is 0-1000."""
 import json
+import math
 from dataclasses import asdict, dataclass, field
 
 from scout.agent.state import MAX_BOXES, StopFailed, StopState, to_pixels, to_thousandths
@@ -3212,11 +3355,25 @@ from scout.vision.sam_parse import SamRecord
 
 VIEW_TYPES = ("row", "top_down", "close_up", "wide")
 KINDS = ("crop", "weed")
+CONFIDENCES = ("high", "medium", "low")
 ZOOM_MAX_PX = 768
-MAX_LISTED = 30
+MAX_LISTED = 100
 NOTHING = "nothing found"
 MOSTLY_CROP_NOTE = "mostly crop"
 PATCH_NOTE = "large patch; counted as one, approximate"
+
+
+def _number(value, name: str) -> float | None:
+    """A model-written number (3, 3.5 or "3"); None stays None."""
+    if value is None:
+        return None
+    try:
+        number = math.nan if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError, OverflowError):
+        number = math.nan
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{name} must be a number or null, got {value!r}")
+    return number
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -3230,7 +3387,7 @@ _BOX = {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems"
 
 TOOL_SCHEMAS = [
     _fn("segment", "Ask SAM 3.1 for every instance of one concept, a short noun phrase. It finds \"crop row\" "
-        "(kind crop) and distinct things such as \"dandelion\" or \"flower\" (kind weed). It does not find crop "
+        "(kind crop) and distinct things such as \"dandelion\" or \"yellow flower\" (kind weed). It does not find crop "
         "plants, leaves, or weeds in general: use mark for those.",
         {"phrase": {"type": "string"}, "kind": {"type": "string", "enum": list(KINDS)}},
         ["phrase", "kind"]),
@@ -3348,6 +3505,10 @@ class ToolRunner:
         records: dict[str, SamRecord] = {}
         for record in self.sam.segment_boxes(self.state.image, pixel_boxes):
             records.setdefault(record.object_id, record)  # object i + 1 is box i
+        asked = {str(n) for n in range(1, len(boxes) + 1)}
+        unexpected = [object_id for object_id in records if object_id not in asked]
+        if unexpected:
+            self.state.log("mark", f"SAM returned unexpected object ids {unexpected[:5]}", ok=False)
         found, notes = [], []
         for n, label in enumerate(labels, start=1):
             record = records.get(str(n))
@@ -3386,22 +3547,26 @@ class ToolRunner:
             inst = self.state.instances.get(item["instance_id"])
             if inst is None:
                 raise ValueError(f"unknown instance {item['instance_id']}")
-            if item["role"] not in ("crop", "weed", "ignore"):
-                raise ValueError(f"bad role {item['role']}")
-            species = item.get("species_id")
-            if species is not None and species not in self.weeds:
-                species = self.weeds.resolve(species)
+            role = item["role"]
+            if role not in ("crop", "weed", "ignore"):
+                raise ValueError(f"bad role {role}")
+            species = None
+            named = item.get("species_id")
+            if role == "weed" and named not in (None, ""):  # a crop's name is not a weed species: ignore it
+                species = named if named in self.weeds else self.weeds.resolve(named)
                 if species is None:
-                    raise ValueError(f"unknown species_id {item['species_id']}; use an id from the allowed list or null")
-            resolved.append((inst, item, species))
-        for inst, item, species in resolved:
-            inst.role = item["role"]
-            inst.species_id = species if item["role"] == "weed" else None
-            inst.height_in = item.get("height_in")
-            inst.leaf_count = item.get("leaf_count")
-            inst.id_confidence = item["id_confidence"]
-            inst.check_this = inst.check_this or item["id_confidence"] == "low"
-        weeds = [inst for inst, _, _ in resolved if inst.role == "weed"]
+                    raise ValueError(f"unknown species_id {named}; use an id from the allowed list or null")
+            confidence = item["id_confidence"]
+            if confidence not in CONFIDENCES:
+                raise ValueError(f"id_confidence must be one of {list(CONFIDENCES)}")
+            height = _number(item.get("height_in"), "height_in")
+            leaves = _number(item.get("leaf_count"), "leaf_count")
+            resolved.append((inst, role, species, confidence, height, None if leaves is None else int(leaves)))
+        for inst, role, species, confidence, height, leaves in resolved:
+            inst.role, inst.species_id, inst.id_confidence = role, species, confidence
+            inst.height_in, inst.leaf_count = height, leaves
+            inst.check_this = confidence == "low" or self.state.is_patch(inst)  # a confident verdict clears the flag
+        weeds = [inst for inst, role, *_ in resolved if role == "weed"]
         if len(resolved) == 1 and weeds:
             inst = weeds[0]
             name = self.weeds.get(inst.species_id).common_name if inst.species_id else "unidentified weed"
@@ -3410,20 +3575,20 @@ class ToolRunner:
             summary = "Identified: " + ", ".join([name] + [d for d in details if d])
         else:
             summary = f"Classified {len(resolved)} plants ({len(weeds)} weeds)"
-        self.state.log("classify", summary, [inst.id for inst, _, _ in resolved])
-        return ToolResult(json.dumps({"ok": [inst.id for inst, _, _ in resolved]}))
+        ids = [inst.id for inst, *_ in resolved]
+        self.state.log("classify", summary, ids)
+        return ToolResult(json.dumps({"ok": ids}))
 
     def _tool_measure(self, view_type: str) -> ToolResult:
         if view_type not in VIEW_TYPES:
             raise ValueError(f"view_type must be one of {list(VIEW_TYPES)}")
         self.state.view_type = view_type
-        if view_type in ("row", "wide") and self.state.sky is None:
-            records = self.sam.segment_concept(self.state.image, "sky")
-            self.state.sky = mk.union([r.full_mask(self.state.size) for r in records], self.state.size)
+        if view_type in ("row", "wide"):
+            self.state.ensure_sky(self.sam)
         metrics = compute_metrics(list(self.state.instances.values()), self.state.masks, self.state.size,
                                   view_type, self.state.sky, self.state.row_band())
         out = asdict(metrics)
-        out["count_approximate"] = metrics.count_approximate or self.state.count_approximate()
+        out["count_approximate"] = metrics.count_approximate or self.state.count_approximate(view_type)
         self.state.log("measure", f"Measure: weed cover {metrics.weed_cover_pct}%, {metrics.weed_count} weeds")
         return ToolResult(json.dumps(out))
 
@@ -3435,8 +3600,8 @@ class ToolRunner:
         if self.state.view_type is None:
             self.state.log("finish", "Refused: measure has not run", ok=False)
             return ToolResult("error: call measure first")
-        self.state.crop_stage = crop_stage
-        self.state.notes = notes
+        self.state.crop_stage = None if crop_stage is None else (str(crop_stage).strip() or None)
+        self.state.notes = str(notes or "")
         self.state.finished = True
         self.state.log("finish", "Stop closed")
         return ToolResult("ok", finished=True)
@@ -3445,7 +3610,7 @@ class ToolRunner:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_tools.py -v`
-Expected: 10 passed
+Expected: 16 passed
 
 - [ ] **Step 5: Commit**
 
@@ -3460,9 +3625,9 @@ Muse Spark takes 13–16 s per turn, so the prompt aims for 6 turns or fewer wit
 1. Mark the crop and the weeds in the first turn.
 2. Zoom on at most 2 doubtful instances, and mark missed weeds once more if needed.
 3. Classify every weed in one call.
-4. Measure, then finish.
+4. Measure, then finish. Classify, measure and finish can share one turn.
 
-Within a turn, crop `mark`/`segment` calls run first, so the weed check sees the crop. Outputs still go back in the model's order. `run_stop` turns `StopFailed`, `BadRequest` and `LlmError` into a failed stop that keeps its step log. `finalize` keeps marked-but-unclassified weeds as weeds with `check_this`. An alfalfa stop needs no crop boxes to count, because alfalfa is solid-seeded.
+Within a turn, crop `mark`/`segment` calls run first, so the weed check sees the crop. Then come the other tools, then `measure`, then `finish`. Outputs still go back in the model's order. `run_stop` turns any exception (`StopFailed`, `BadRequest`, `LlmError`, timeouts, dropped connections) into a failed stop that keeps its step log, so one bad stop never takes down the walk. A stop where the agent never produced an instance or ran `measure` is also `failed`, not `no_crop_found`. `finalize` keeps marked-but-unclassified weeds as weeds with `check_this`. An alfalfa stop needs no crop boxes to count, because alfalfa is solid-seeded.
 
 **Files:**
 - Create: `scout/agent/prompts.py`, `scout/agent/stop_agent.py`
@@ -3493,6 +3658,7 @@ class FakeLlm:
 
 `tests/test_stop_agent.py`:
 ```python
+import itertools
 from dataclasses import replace
 
 from scout.agent.llm import LlmError, LlmTurn, ToolCall
@@ -3521,6 +3687,25 @@ def _close(view_type="row"):
             ToolCall("c-f", "finish", {"crop_stage": None, "notes": "done"})]
 
 
+class TimeoutSam(FakeSam):
+    """A SAM whose calls time out: the sky prompt, or every box request after the first."""
+
+    def __init__(self, sky=False, later_boxes=False):
+        super().__init__()
+        self.sky, self.later_boxes = sky, later_boxes
+
+    def segment_concept(self, image, phrase):
+        if self.sky and phrase == "sky":
+            self.calls.append(("concept", phrase))
+            raise TimeoutError("sky timed out")
+        return super().segment_concept(image, phrase)
+
+    def segment_boxes(self, image, boxes):
+        if self.later_boxes and any(kind == "boxes" for kind, _ in self.calls):
+            raise TimeoutError("boxes timed out")
+        return super().segment_boxes(image, boxes)
+
+
 def _run(llm, crop="soybean", settings=SETTINGS, sam=None, **kwargs):
     return run_stop(make_image(100, 100), crop, llm, sam or FakeSam(), small_weedbook(), settings, **kwargs)
 
@@ -3547,7 +3732,8 @@ def test_full_stop():
     first, third = llm.requests[0], llm.requests[2]
     assert [t["name"] for t in first["tools"]][:2] == ["segment", "mark"] and "0 to 1000" in first["instructions"]
     assert third["previous_response_id"] == "r2"
-    assert any(part.get("type") == "message" for part in third["input"])  # zoom image rides in a user message
+    assert [part["type"] for part in third["input"]] == ["function_call_output", "message"]  # the zoom image rides
+    # in a user message after the tool output
 
 
 def test_crop_marks_run_first_within_a_turn():
@@ -3568,12 +3754,21 @@ def test_call_limit_closes_stop_and_flags_unclassified_weeds():
     assert result.flags == ["Check s0-i3: marked but never classified", "Check s0-i4: marked but never classified"]
 
 
+PATCH = ToolCall("c2", "mark", {"kind": "weed", "boxes": [{"box": [400, 750, 1000, 1000], "label": "foxtail"}]})
+
+
 def test_patch_makes_the_count_approximate():
-    patch = ToolCall("c2", "mark", {"kind": "weed", "boxes": [{"box": [400, 750, 1000, 1000], "label": "foxtail"}]})
-    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, patch], ""), LlmTurn("r2", [_classify("s0-i3"), *_close("close_up")], "")])
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, PATCH], ""), LlmTurn("r2", [_classify("s0-i3"), *_close("top_down")], "")])
     result, _ = _run(llm)
     assert result.weed_count == 1 and result.count_approximate is True
     assert "Weed count is approximate: some weeds merged into patches" in result.flags
+
+
+def test_a_big_plant_in_a_close_up_is_not_a_patch():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, PATCH], ""), LlmTurn("r2", [_classify("s0-i3"), *_close("close_up")], "")])
+    result, _ = _run(llm)
+    assert result.weed_count == 1 and result.count_approximate is False
+    assert result.flags == ["Check s0-i3: may be crop or several plants"]
 
 
 def test_repeated_bad_request_fails_stop_and_keeps_steps():
@@ -3584,15 +3779,70 @@ def test_repeated_bad_request_fails_stop_and_keeps_steps():
 
 
 def test_model_errors_fail_the_stop_and_keep_steps():
-    for error in (LlmError("response r2 was incomplete"), BadRequest("image too large")):
+    for error in (LlmError("response r2 was incomplete"), BadRequest("image too large"),
+                  TimeoutError("request timed out"), ConnectionError("connection dropped")):
         result, _ = _run(FakeLlm([LlmTurn("r1", [MARK_CROP], ""), error]))
         assert result.status == "failed" and [s.tool for s in result.steps] == ["mark", "error"]
 
 
-def test_prose_reply_is_nudged_then_closed():
+def test_prose_reply_is_nudged_then_fails_the_stop():
     llm = FakeLlm([LlmTurn("r1", [], "I think there are weeds."), LlmTurn("r2", [], "Still prose.")])
     result, _ = _run(llm)
-    assert result.status == "no_crop_found" and len(llm.requests) == 2
+    assert result.status == "failed" and len(llm.requests) == 2  # the agent produced nothing: not "no crop found"
+    assert result.flags == ["This stop could not be analyzed"]
+
+
+def test_no_crop_found_needs_a_stop_the_agent_worked_on():
+    llm = FakeLlm([LlmTurn("r1", _close("top_down"), "")])
+    result, _ = _run(llm)
+    assert result.status == "no_crop_found" and result.weed_count == 0
+
+
+def test_sky_timeout_does_not_fail_the_stop():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""),
+                   LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close("row")], "")])
+    sam = TimeoutSam(sky=True)
+    result, state = _run(llm, sam=sam)
+    assert result.status == "ok" and result.weed_count == 2 and state.sky is None
+    assert [s.tool for s in result.steps].count("sky") == 1  # logged once
+    assert sam.calls.count(("concept", "sky")) == 1  # asked once, by measure; finalize does not ask again
+
+
+def test_a_sam_timeout_fails_only_this_stop_and_keeps_steps():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", [MARK_WEEDS], "")])
+    result, _ = _run(llm, sam=TimeoutSam(later_boxes=True))
+    assert result.status == "failed" and [s.tool for s in result.steps] == ["mark", "error"]
+    assert result.steps[-1].summary.startswith("TimeoutError")
+
+
+def test_measure_and_finish_run_last_whatever_order_the_model_lists_them():
+    finish, measure = _close()[1], _close()[0]
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""), LlmTurn("r2", [_classify("s0-i3", "s0-i4")], ""),
+                   LlmTurn("r3", [finish, measure], "")])
+    result, state = _run(llm)
+    assert len(llm.requests) == 3 and state.finished and result.notes == "done"
+    assert [s.tool for s in result.steps][-2:] == ["measure", "finish"]
+    # classify, measure and finish together in one turn, listed backwards
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""),
+                   LlmTurn("r2", [finish, measure, _classify("s0-i3", "s0-i4")], "")])
+    result, state = _run(llm)
+    assert len(llm.requests) == 2 and state.finished and result.weed_count == 2 and result.flags == []
+    assert [s.tool for s in result.steps] == ["mark", "mark", "classify", "measure", "finish"]
+
+
+def test_time_limit_closes_the_stop_after_the_turn_in_progress():
+    ticks = itertools.count(0, 100)  # every clock reading is 100 s later: the 240 s budget is gone after one turn
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""), LlmTurn("r2", [_classify("s0-i3", "s0-i4")], "")])
+    result, _ = _run(llm, clock=lambda: float(next(ticks)))
+    assert len(llm.requests) == 1 and result.status == "ok"
+    assert result.steps[-1].tool == "limit" and result.steps[-1].ok is False
+
+
+def test_weed_free_top_down_stop_has_zero_density():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", _close("top_down"), "")])
+    result, _ = _run(llm)
+    assert result.status == "ok" and result.weed_count == 0 and result.flags == []
+    assert result.density_per_m2 == 0.0 and result.species_density == {}
 
 
 def test_alfalfa_needs_no_crop_boxes():
@@ -3609,6 +3859,8 @@ def test_instructions_use_thousandths_and_crop_hints():
     assert "0 to 1000" in soybean and "waterhemp, horseweed" in soybean and "12 tool calls" in soybean
     assert '"crop row"' in soybean and "crop boxes are optional" in alfalfa
     assert "crop boxes are optional" not in soybean
+    assert "no weeds" in soybean and '"yellow flower"' in soybean and '"flower"' not in soybean  # alfalfa blooms
+    assert "estimate" in soybean and "null" in soybean
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -3638,18 +3890,22 @@ Coordinates: every box you give or get is [x1, y1, x2, y2] from 0 to 1000 on bot
 Procedure (aim for 6 turns or fewer):
 1. In your first turn, call mark with kind "crop" and mark with kind "weed"; both calls can go in the same turn. \
 {crop_boxes} For the weeds, give a tight box around every weed, one box per plant, nearest or largest first, at \
-most 16. A distinctive flowering weed can also be found by phrase: segment "dandelion" or "flower" with kind "weed".
-2. Read the results. Zoom on at most 2 doubtful instances (check_this is true). If you missed weeds, mark them \
-once more.
+most 16. If you see no weeds, skip the weed mark: never box crop, soil or residue as a weed. A distinctive \
+flowering weed can also be found by phrase: segment "dandelion" or "yellow flower" with kind "weed".
+2. Read the results: "mostly crop" means that box was on crop and was dropped; "nothing found" means SAM found no \
+plant there. Zoom on at most 2 doubtful instances (check_this is true); each close-up arrives at your next turn. If \
+you missed weeds, mark them once more.
 3. classify every weed instance in one call. Use a species_id from this list only: {", ".join(species_ids)}. Use \
-null when you cannot tell. Give height_in and leaf_count when visible. Use role "crop" for an instance that is \
-really crop and "ignore" for soil, residue, or shadow.
+null when you cannot tell. Give leaf_count when you can count the leaves. height_in is an estimate from visible \
+size cues (a {crop} plant, a leaf, the row spacing): use null when there is no cue. Use role "crop" for an \
+instance that is really crop and "ignore" for soil, residue, or shadow.
 4. measure with the view_type that fits: row (looking along rows), top_down (camera pointing straight down), \
 close_up (a few plants fill the frame), wide (field to the horizon). Then finish with the crop growth stage if \
-you can tell (for example V3) and one sentence of notes. measure and finish can go in the same turn.
+you can tell (for example V3) and one sentence of notes. classify, measure and finish can all go in one turn, in \
+that order; if nothing needs a zoom, do that in your second turn.
 
-Rules: never invent numbers; measurements come only from measure. You have at most {max_calls} tool calls. Always \
-respond with tool calls, not prose. Every coordinate is 0 to 1000."""
+Rules: never invent measurements; cover, counts and density come only from measure. You have at most {max_calls} \
+tool calls. Always respond with tool calls, not prose. Every coordinate is 0 to 1000."""
 
 
 FIELD_INSTRUCTIONS = """You are an agronomist writing the reasoning for a field scouting report. You receive JSON \
@@ -3667,22 +3923,33 @@ example rotating herbicide groups). Use only numbers that appear in the JSON. Do
 import time
 from typing import Callable
 
-from scout.agent.llm import Llm, LlmError, ToolCall, user_message
+from scout.agent.llm import Llm, ToolCall, user_message
 from scout.agent.prompts import stop_instructions
-from scout.agent.state import StopFailed, StopState
+from scout.agent.state import StopState
 from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
 from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import StopImage
 from scout.config import Settings
 from scout.models import AgentStep, Instance, StopResult
-from scout.retry import BadRequest
-from scout.vision import masks as mk
 from scout.vision.measure import compute_metrics
 
+FAILED_FLAG = "This stop could not be analyzed"
 
-def crop_first(calls: list[ToolCall]) -> list[ToolCall]:
-    """Crop marks and segments run before the rest of a turn's calls, so the weed check sees the crop."""
-    return sorted(calls, key=lambda c: 0 if c.name in ("mark", "segment") and c.arguments.get("kind") == "crop" else 1)
+
+def run_order(calls: list[ToolCall]) -> list[ToolCall]:
+    """Crop marks and segments run first, so the weed check sees the crop; then the other tools; measure and finish
+    last, so they see the turn's verdicts. The order is stable within each rank."""
+    def rank(call: ToolCall) -> int:
+        if call.name in ("mark", "segment") and call.arguments.get("kind") == "crop":
+            return 0
+        return {"measure": 2, "finish": 3}.get(call.name, 1)
+    return sorted(calls, key=rank)
+
+
+def _failed(state: StopState) -> StopResult:
+    image = state.image
+    return StopResult(stop_index=image.index, image_hash=image.hash, gps=image.gps, steps=state.steps,
+                      flags=[FAILED_FLAG], status="failed")
 
 
 def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settings: Settings,
@@ -3709,7 +3976,7 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
                 pending = [user_message("Call a tool. If you are done, call measure and then finish.")]
                 continue
             outputs, images = {}, []
-            for call in crop_first(turn.calls):
+            for call in run_order(turn.calls):
                 state.calls += 1
                 result = runner.run(call.name, call.arguments)
                 outputs[call.call_id] = result.output
@@ -3719,11 +3986,10 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
             if images:
                 pending.append(user_message("Close-ups you asked for: " + "; ".join(c for c, _ in images),
                                             [url for _, url in images]))
-    except (StopFailed, BadRequest, LlmError) as error:
+        return finalize(state, sam), state
+    except Exception as error:  # StopFailed, BadRequest, LlmError, timeouts, dropped connections: this stop only
         state.log("error", f"{type(error).__name__}: {error}", ok=False)
-        return StopResult(stop_index=image.index, image_hash=image.hash, gps=image.gps, steps=state.steps,
-                          flags=["This stop could not be analyzed"], status="failed"), state
-    return finalize(state, sam), state
+        return _failed(state), state
 
 
 def _flag(inst: Instance) -> str:
@@ -3736,20 +4002,18 @@ def _flag(inst: Instance) -> str:
 
 def finalize(state: StopState, sam) -> StopResult:
     """Weeds that were marked but never classified stay weeds, flagged; measurements are recomputed."""
+    if not state.instances and state.view_type is None:  # the agent got nowhere: its failure, not a stop without crop
+        return _failed(state)
     for inst in state.instances.values():
         if inst.role == "weed" and inst.id_confidence is None:
             inst.check_this = True
     view = state.view_type or "row"
-    if view in ("row", "wide") and state.sky is None:
-        try:
-            records = sam.segment_concept(state.image, "sky")
-            state.sky = mk.union([r.full_mask(state.size) for r in records], state.size)
-        except Exception:  # sky removal is best effort; cover is then measured over the whole photo
-            state.sky = None
+    if view in ("row", "wide"):
+        state.ensure_sky(sam)
     m = compute_metrics(list(state.instances.values()), state.masks, state.size, view, state.sky, state.row_band())
     instances = list(state.instances.values())
     flags = [_flag(i) for i in instances if i.role == "weed" and i.check_this]
-    if m.count_approximate or state.has_patch():
+    if m.count_approximate or (state.has_patch() and view != "close_up"):
         flags.append("Weed count is approximate: some weeds merged into patches")
     if state.box_cap_hit:
         flags.append("Weed count is a floor: a mark call used all 16 boxes")
@@ -3759,7 +4023,7 @@ def finalize(state: StopState, sam) -> StopResult:
     return StopResult(
         stop_index=state.image.index, image_hash=state.image.hash, view_type=view, gps=state.image.gps,
         crop_stage=state.crop_stage, weed_cover_pct=m.weed_cover_pct, crop_cover_pct=m.crop_cover_pct,
-        weed_count=m.weed_count, count_approximate=m.count_approximate or state.count_approximate(),
+        weed_count=m.weed_count, count_approximate=m.count_approximate or state.count_approximate(view),
         density_per_m2=m.density_per_m2, in_row_weed_share=m.in_row_weed_share, species=m.species,
         species_cover_pct=m.species_cover_pct, species_density=m.species_density,
         species_max_height_in=m.species_max_height_in, max_height_in=m.max_height_in, flags=flags,
@@ -3771,7 +4035,7 @@ def finalize(state: StopState, sam) -> StopResult:
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_stop_agent.py -v`
-Expected: 9 passed
+Expected: 16 passed
 
 - [ ] **Step 6: Run the whole suite and commit**
 
