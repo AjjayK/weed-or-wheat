@@ -22,6 +22,7 @@
 
 - **Python version:** run everything in a venv with Python 3.10+, from the repo root.
 - **Commands:** commands are written for Git Bash. In PowerShell, activate with `.venv\Scripts\Activate.ps1` instead of `source .venv/Scripts/activate`.
+- **Scripts:** run `scripts/*.py` from the repo root with the repo on the import path: `PYTHONPATH=. python scripts/x.py` in Git Bash, or `$env:PYTHONPATH="."` first in PowerShell.
 - **Commits:** end every commit message with the line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The commit steps below show the subject line only.
 - **User tasks:** tasks marked **[USER]** need the human: an account, a choice, photos, or a recording. An agent executing the plan stops at these and asks.
 - **API keys:** tests never call the network. Only `scripts/` and the running app use real API keys.
@@ -1758,18 +1759,24 @@ git commit -m "feat: add Muse Spark Responses wrapper"
 
 `scripts/spike_agent.py`:
 ```python
-"""Day-1 test: Muse Spark tool calling, an image in a follow-up user message, and structured output.
+"""Day-1 test: Muse Spark tool calling, an image in a follow-up user message, structured output, and pointing.
 
-Usage: python scripts/spike_agent.py field-images/IMG_4215.JPG
+Usage: python scripts/spike_agent.py field-images/IMG_4215.JPG [photos to test pointing on ...]
+Pointing writes spike_out/<photo>__pointing_<pixel|norm1000>.jpg: SAM masks (magenta) from Muse Spark's points (yellow).
 """
 import json
 import sys
 import time
 from pathlib import Path
 
+from PIL import ImageDraw
+
 from scout.agent.llm import Llm, user_message
 from scout.app.ingest import load_image, to_data_url
 from scout.config import get_settings
+from scout.vision import masks as mk
+from scout.vision.overlay import render_overlay
+from scout.vision.sam_client import SamClient
 
 TOOL = {
     "type": "function",
@@ -1783,9 +1790,46 @@ SCHEMA = {
     "schema": {"type": "object", "properties": {"crop": {"type": "string"}, "weeds_visible": {"type": "boolean"}},
                "required": ["crop", "weeds_visible"], "additionalProperties": False},
 }
+POINTS = {
+    "type": "json_schema", "name": "weed_points", "strict": True,
+    "schema": {"type": "object", "properties": {"weeds": {"type": "array", "items": {
+        "type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "what": {"type": "string"}},
+        "required": ["x", "y", "what"], "additionalProperties": False}}},
+        "required": ["weeds"], "additionalProperties": False},
+}
 
 
-def main(photo: str) -> None:
+def pointing(llm: Llm, sam: SamClient, photo: str) -> None:
+    """Ask for one point per weed in two coordinate conventions, segment each point with SAM, and save overlays."""
+    image = load_image(0, Path(photo).read_bytes())
+    width, height = image.size
+    asks = {
+        "pixel": (f"This field photo is {width}x{height} pixels. Give one point (x, y in pixels from the top-left "
+                  "corner) on each weed plant you can see, not on the crop. Put each point on the plant's leaves.",
+                  1.0, 1.0),
+        "norm1000": ("Give one point on each weed plant you can see, not on the crop, as x and y from 0 to 1000 "
+                     "(0,0 is the top-left corner, 1000,1000 the bottom-right). Put each point on the plant's leaves.",
+                     width / 1000, height / 1000),
+    }
+    for name, (prompt, sx, sy) in asks.items():
+        started = time.time()
+        weeds = json.loads(llm.turn([user_message(prompt, [image.work_data_url])], text_format=POINTS).text)["weeds"]
+        points = [(min(width - 1, max(0, round(w["x"] * sx))), min(height - 1, max(0, round(w["y"] * sy))))
+                  for w in weeds]
+        masks = [r.full_mask(image.size) for x, y in points for r in sam.segment_at(image, points=[(x, y, True)])]
+        weed = mk.union(masks, image.size)
+        out = render_overlay(image.work, weed & False, weed)
+        draw = ImageDraw.Draw(out)
+        for x, y in points:
+            draw.ellipse((x - 7, y - 7, x + 7, y + 7), outline=(255, 214, 0), width=3)
+        Path("spike_out").mkdir(exist_ok=True)
+        path = f"spike_out/{Path(photo).stem}__pointing_{name}.jpg"
+        out.save(path, quality=85)
+        print(f"4-{name}) {time.time() - started:.1f}s {len(points)} points {points[:12]} "
+              f"what={[w['what'] for w in weeds][:6]} -> {path}")
+
+
+def main(photo: str, pointing_photos: list[str]) -> None:
     llm = Llm.from_settings(get_settings())
     image = load_image(0, Path(photo).read_bytes())
     started = time.time()
@@ -1802,19 +1846,24 @@ def main(photo: str) -> None:
     print(f"2) {time.time() - started:.1f}s follow-up with image: {second.text[:300]!r}")
     third = llm.turn([user_message("What crop is this and are weeds visible?", [image.work_data_url])], text_format=SCHEMA)
     print(f"3) structured output: {json.loads(third.text)}")
+    sam = SamClient.from_settings(get_settings())
+    for other in pointing_photos:
+        pointing(llm, sam, other)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2:])
 ```
 
 - [ ] **Step 2: Run it**
 
-Run: `python scripts/spike_agent.py field-images/IMG_4215.JPG`
+Run (from the repo root, with the repo on the import path):
+`PYTHONPATH=. python scripts/spike_agent.py field-images/IMG_4215.JPG field-images/IMG_4219.JPG field-images/IMG_4215.JPG field-images/IMG_3926.JPG`
 Expected:
-- Line 1 shows a `report_rows` call with an integer count.
+- Line 1 shows a `report_rows` call with an integer count. The tool schema leaves `notes` optional, so a 400 here means Meta applies strict mode to tools by default. In that case add `"strict": False` to `_fn` in Task 16.
 - Line 2 describes the close-up.
 - Line 3 prints a dict with `crop` and `weeds_visible`.
+- `4-pixel` and `4-norm1000` lines for each pointing photo. Open the `__pointing_*.jpg` files. Each yellow circle should sit on a weed and have a magenta SAM mask on that weed. Pick the convention whose points land on weeds, and record per photo how many points hit a weed, hit crop, or hit soil. Task 17's prompt uses the winning convention.
 
 If line 1 has no calls, try `AGENT_MODEL=muse-spark-1.2` in `.env` and record the result.
 
