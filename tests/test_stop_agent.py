@@ -1,4 +1,5 @@
 import itertools
+import json
 from dataclasses import replace
 
 from scout.agent.llm import LlmError, LlmTurn, ToolCall
@@ -125,6 +126,69 @@ def test_model_errors_fail_the_stop_and_keep_steps():
         assert result.status == "failed" and [s.tool for s in result.steps] == ["mark", "error"]
 
 
+LOST = BadRequest("Error code: 400 - {'error': {'message': 'referenced response not found or expired', "
+                  "'type': 'invalid_request_error'}}")
+
+
+def _turn(response_id, calls):
+    """A turn whose output items replay its calls, as a real Llm.turn fills them."""
+    items = [{"type": "function_call", "call_id": c.call_id, "name": c.name, "arguments": json.dumps(c.arguments)}
+             for c in calls]
+    return LlmTurn(response_id, calls, "", items)
+
+
+def _kinds(items):
+    return [item.get("type") or item["role"] for item in items]
+
+
+def test_a_lost_conversation_is_resent_in_full_and_the_stop_goes_on_stateless():
+    zoom = ToolCall("c3", "zoom", {"instance_id": "s0-i4"})
+    llm = FakeLlm([_turn("r1", [MARK_CROP, MARK_WEEDS]), LOST, _turn("r2", [zoom]),
+                   _turn("r3", [_classify("s0-i3", "s0-i4"), *_close()])])
+    result, state = _run(llm)
+    assert result.status == "ok" and state.finished and result.weed_count == 2
+    first, lost, retry, last = llm.requests
+    assert first["previous_response_id"] is None and lost["previous_response_id"] == "r1"
+    assert retry["previous_response_id"] is None  # the same turn, resent without the chain
+    assert retry["input"][0] == first["input"][0]  # starts with the photo message
+    assert _kinds(retry["input"]) == ["message", "function_call", "function_call",
+                                      "function_call_output", "function_call_output"]
+    assert [i["call_id"] for i in retry["input"][1:3]] == [i["call_id"] for i in retry["input"][3:]] == ["c1", "c2"]
+    assert retry["input"][1]["name"] == "mark" and json.loads(retry["input"][1]["arguments"])["kind"] == "crop"
+    assert retry["input"][3:] == lost["input"]  # exactly the items the lost request carried
+    assert last["previous_response_id"] is None  # the rest of the stop stays stateless
+    assert last["input"][:5] == retry["input"]  # the history only grows
+    assert _kinds(last["input"][5:]) == ["function_call", "function_call_output", "message"]
+    assert [i["call_id"] for i in last["input"][5:7]] == ["c3", "c3"]  # the zoom call, its output, then the close-up
+    retries = [s for s in result.steps if s.tool == "retry"]
+    assert [(s.ok, s.summary) for s in retries] == [(False, "Muse Spark lost the conversation; resent it in full")]
+
+
+def test_a_second_failure_after_the_resend_fails_the_stop_and_keeps_steps():
+    llm = FakeLlm([_turn("r1", [MARK_CROP]), LOST, LOST])
+    result, _ = _run(llm)
+    assert result.status == "failed" and len(llm.requests) == 3  # one resend only
+    assert [s.tool for s in result.steps] == ["mark", "retry", "error"]
+
+
+def test_a_resent_history_keeps_assistant_text_and_the_nudge():
+    prose = LlmTurn("r1", [], "I see weeds.", [{"role": "assistant", "content": "I see weeds."}])
+    llm = FakeLlm([prose, LOST, _turn("r2", [MARK_CROP]), _turn("r3", _close("top_down"))])
+    result, _ = _run(llm)
+    assert result.status == "ok"
+    retry = llm.requests[2]
+    assert _kinds(retry["input"]) == ["message", "assistant", "message"]  # photo, its own text, the nudge
+    assert retry["input"][1] == {"role": "assistant", "content": "I see weeds."}
+    assert retry["input"][2]["content"][0]["text"].startswith("Call a tool")
+
+
+def test_a_stateless_stop_does_not_resend_again():
+    llm = FakeLlm([_turn("r1", [MARK_CROP]), LOST, _turn("r2", [MARK_WEEDS]), LOST])
+    result, _ = _run(llm)
+    assert result.status == "failed" and len(llm.requests) == 4
+    assert [s.tool for s in result.steps].count("retry") == 1
+
+
 def test_prose_reply_is_nudged_then_fails_the_stop():
     llm = FakeLlm([LlmTurn("r1", [], "I think there are weeds."), LlmTurn("r2", [], "Still prose.")])
     result, _ = _run(llm)
@@ -201,3 +265,5 @@ def test_instructions_use_thousandths_and_crop_hints():
     assert "crop boxes are optional" not in soybean
     assert "no weeds" in soybean and '"yellow flower"' in soybean and '"flower"' not in soybean  # alfalfa blooms
     assert "estimate" in soybean and "null" in soybean
+    assert "close to the camera" in soybean and "close to the camera" in alfalfa
+    assert "hug each row's plants" in soybean

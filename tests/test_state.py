@@ -41,6 +41,17 @@ def test_large_weed_mask_is_kept_as_an_approximate_patch():
     assert state.has_patch() and state.count_approximate()
 
 
+def test_patch_sized_weed_mostly_on_any_crop_is_dropped_even_inside_a_canopy():
+    state, scene = _state(), field_scene()
+    canopy = state.add_mask(scene["row"], "prompt", "soybean row", role="crop")
+    assert state.is_canopy(canopy)
+    assert state.add_weed(rect(10, 0, 30, 80), "prompt", "weed patch") is None  # 16% of the frame, all on the canopy
+    assert state.add_weed(rect(0, 0, 50, 30), "prompt", "weed patch") is not None  # 15%, but only 40% on the canopy
+    small = state.add_weed(rect(12, 50, 22, 60), "prompt", "leaf in the row")  # the same canopy, a plant-sized mark
+    assert small is not None and small.role == "weed" and small.check_this and not state.is_patch(small)
+    assert list(state.instances) == [canopy.id, "s0-i2", small.id]
+
+
 def test_row_band_from_a_row_canopy_leaves_out_sky():
     state = _state()
     assert state.row_band() is None  # no crop yet

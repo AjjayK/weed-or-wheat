@@ -1,10 +1,10 @@
 """Thin wrapper over the Responses API for Muse Spark: one call = one LlmTurn."""
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from scout.retry import with_retry
+from scout.retry import BadRequest, with_retry
 
 
 class LlmError(RuntimeError):
@@ -23,6 +23,14 @@ class LlmTurn:
     response_id: str
     calls: list[ToolCall]
     text: str
+    # The response's output as input items that can be replayed without previous_response_id: function calls with
+    # their raw argument strings, and assistant text. Reasoning items are left out.
+    output_items: list[dict] = field(default_factory=list)
+
+
+def is_lost_response(error: Exception) -> bool:
+    """Meta sometimes forgets a response a request chains to: 400 "referenced response not found or expired"."""
+    return isinstance(error, BadRequest) and "referenced response not found" in str(error).lower()
 
 
 def user_message(text: str, image_urls: Sequence[str] = (), file: tuple[str, str] | None = None) -> dict:
@@ -66,15 +74,21 @@ class Llm:
         if status in ("failed", "incomplete", "cancelled"):
             detail = getattr(response, "incomplete_details", None) or getattr(response, "error", None)
             raise LlmError(f"Muse Spark response {response.id} was {status}: {detail}")
-        calls = []
+        calls, items = [], []
         for item in response.output:
-            if getattr(item, "type", None) != "function_call":
-                continue
-            try:
-                arguments = json.loads(item.arguments or "{}")
-            except json.JSONDecodeError:
-                arguments = None
-            if not isinstance(arguments, dict):  # tools are called with **arguments, so only an object is usable
-                arguments = {"__invalid__": item.arguments}
-            calls.append(ToolCall(item.call_id, item.name, arguments))
-        return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "")
+            kind = getattr(item, "type", None)
+            if kind == "message" and getattr(item, "role", "assistant") == "assistant":
+                text = "".join(part.text for part in item.content or [] if getattr(part, "type", None) == "output_text")
+                if text:
+                    items.append({"role": "assistant", "content": text})
+            elif kind == "function_call":
+                try:
+                    arguments = json.loads(item.arguments or "{}")
+                except json.JSONDecodeError:
+                    arguments = None
+                if not isinstance(arguments, dict):  # tools are called with **arguments, so only an object is usable
+                    arguments = {"__invalid__": item.arguments}
+                calls.append(ToolCall(item.call_id, item.name, arguments))
+                items.append({"type": "function_call", "call_id": item.call_id, "name": item.name,
+                              "arguments": item.arguments or "{}"})
+        return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "", items)

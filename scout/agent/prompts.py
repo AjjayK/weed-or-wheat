@@ -17,7 +17,10 @@ Procedure (aim for 6 turns or fewer):
 1. In your first turn, call mark with kind "crop" and mark with kind "weed"; both calls can go in the same turn. \
 {crop_boxes} For the weeds, give a tight box around every weed, one box per plant, nearest or largest first, at \
 most 16. If you see no weeds, skip the weed mark: never box crop, soil or residue as a weed. A distinctive \
-flowering weed can also be found by phrase: segment "dandelion" or "yellow flower" with kind "weed".
+flowering weed can also be found by phrase: segment "dandelion" or "yellow flower" with kind "weed". \
+Crop leaves close to the camera (the bottom of a row photo) are crop: box a weed only where you see the whole \
+weed plant, distinct from the crop. Crop boxes hug each row's plants; don't stretch them over the soil between \
+rows.
 2. Read the results: "mostly crop" means that box was on crop and was dropped; "nothing found" means SAM found no \
 plant there. Zoom on at most 2 doubtful instances (check_this is true); each close-up arrives at your next turn. If \
 you missed weeds, mark them once more.

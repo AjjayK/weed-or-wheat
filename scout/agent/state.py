@@ -22,6 +22,7 @@ CANOPY_SPAN_FRAC = 1 / 3  # a crop mask this long (share of the image's long sid
 MOSTLY_CROP = 0.6  # a weed mask this much on crop plants is a crop hit and is dropped
 CHECK_OVERLAP = 0.3  # a weed mask this much on any crop is kept but flagged for a closer look
 PATCH_FRAC = 0.12  # a weed mask over 12% of the frame is a patch of plants: kept as one, flagged, count approximate
+PATCH_MOSTLY_CROP = 0.5  # a patch this much on any crop (canopy too) is crop foliage, not a weed patch: dropped
 MAX_BOXES = 16  # SAM takes at most 16 objects per request
 
 
@@ -105,24 +106,32 @@ class StopState:
         left, top, right, bottom = inst.box
         return max(right - left, bottom - top) >= CANOPY_SPAN_FRAC * max(self.size)
 
-    def is_patch(self, inst: Instance) -> bool:
+    def _patch_sized(self, area_px: int) -> bool:
         width, height = self.size
-        return inst.area_px > PATCH_FRAC * width * height
+        return area_px > PATCH_FRAC * width * height
+
+    def is_patch(self, inst: Instance) -> bool:
+        return self._patch_sized(inst.area_px)
 
     def add_weed(self, mask: np.ndarray, source: str, prompt: str, confidence: float | None = None) -> Instance | None:
-        """Register a weed mask, or return None when it mostly lies on crop plants (a box drawn on crop).
+        """Register a weed mask, or return None when it mostly lies on crop (a box drawn on crop).
 
-        Only separate crop plants can veto a weed: a weed growing inside a row sits almost wholly in the row-canopy
-        mask, so canopy overlap only flags it. Weeds overlapping any crop, and large patches, get check_this.
+        Only separate crop plants can veto a plant-sized weed: a weed growing inside a row sits almost wholly in the
+        row-canopy mask, so canopy overlap only flags it. A patch-sized mask is different: a box that big, mostly on
+        any crop, canopy included, is crop foliage near the camera, so it is dropped. Weeds overlapping any crop,
+        and the patches that stay, get check_this.
         """
         area = max(int(mask.sum()), 1)
         plants = self.union_of(lambda i: i.role == "crop" and not self.is_canopy(i))
         if float((mask & plants).sum()) / area >= MOSTLY_CROP:
             return None
         crop = self.union_of(lambda i: i.role == "crop")
+        crop_share = float((mask & crop).sum()) / area
+        patch = self._patch_sized(area)
+        if patch and crop_share >= PATCH_MOSTLY_CROP:
+            return None
         inst = self.add_mask(mask, source, prompt, role="weed", confidence=confidence)
-        on_crop = float((mask & crop).sum()) / area > CHECK_OVERLAP
-        inst.check_this = bool(inst.check_this or on_crop or self.is_patch(inst))
+        inst.check_this = bool(inst.check_this or crop_share > CHECK_OVERLAP or patch)
         return inst
 
     def unclassified(self) -> list[str]:

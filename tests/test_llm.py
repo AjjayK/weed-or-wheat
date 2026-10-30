@@ -2,7 +2,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from scout.agent.llm import Llm, LlmError, user_message
+from scout.agent.llm import Llm, LlmError, LlmTurn, is_lost_response, user_message
+from scout.retry import BadRequest
 
 
 def _response(output, text="", rid="resp_1"):
@@ -78,3 +79,35 @@ def test_real_sdk_response_is_parsed():
     turn = Llm(lambda **k: response, "m").turn("x")
     assert turn.response_id == "resp_1" and turn.text == "done"
     assert [(c.call_id, c.name, c.arguments) for c in turn.calls] == [("c1", "zoom", {"instance_id": "s0-i1"})]
+
+
+def test_output_items_can_be_replayed_as_input():
+    from openai._models import construct_type
+    from openai.types.responses import Response
+    response = construct_type(type_=Response, value={
+        "id": "resp_1", "object": "response", "created_at": 0, "model": "m", "status": "completed",
+        "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+        "output": [{"type": "reasoning", "id": "rs_1", "summary": []},
+                   {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "zoom",
+                    "arguments": '{"instance_id":  "s0-i1"}', "status": "completed"},
+                   {"type": "message", "id": "m1", "role": "assistant", "status": "completed",
+                    "content": [{"type": "output_text", "text": "looking", "annotations": []}]}]})
+    turn = Llm(lambda **k: response, "m").turn("x")
+    assert turn.output_items == [
+        {"type": "function_call", "call_id": "c1", "name": "zoom", "arguments": '{"instance_id":  "s0-i1"}'},
+        {"role": "assistant", "content": "looking"}]  # the raw argument string; reasoning is left out
+
+
+def test_output_items_default_to_empty():
+    assert LlmTurn("r1", [], "").output_items == []
+    turn = Llm(lambda **k: _response([NS(type="reasoning")]), "m").turn("x")
+    assert turn.output_items == []
+
+
+def test_is_lost_response():
+    lost = BadRequest("Error code: 400 - {'error': {'message': 'referenced response not found or expired', "
+                      "'type': 'invalid_request_error'}}")
+    assert is_lost_response(lost)
+    assert is_lost_response(BadRequest("Referenced Response Not Found"))
+    assert not is_lost_response(BadRequest("image too large"))
+    assert not is_lost_response(ValueError("referenced response not found or expired"))  # only a rejected request

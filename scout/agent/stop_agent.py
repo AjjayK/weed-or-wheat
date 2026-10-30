@@ -2,7 +2,7 @@
 import time
 from typing import Callable
 
-from scout.agent.llm import Llm, ToolCall, user_message
+from scout.agent.llm import Llm, ToolCall, is_lost_response, user_message
 from scout.agent.prompts import stop_instructions
 from scout.agent.state import StopState
 from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
@@ -10,6 +10,7 @@ from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import StopImage
 from scout.config import Settings
 from scout.models import AgentStep, Instance, StopResult
+from scout.retry import BadRequest
 from scout.vision.measure import compute_metrics
 
 FAILED_FLAG = "This stop could not be analyzed"
@@ -36,35 +37,47 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
              clock: Callable[[], float] = time.monotonic) -> tuple[StopResult, StopState]:
     state = StopState(image, crop, on_step=on_step, clock=clock)
     runner = ToolRunner(state, sam, weeds, max_calls=settings.max_tool_calls)
-    instructions = stop_instructions(crop, weeds.ids(), settings.max_tool_calls)
+    ask = dict(instructions=stop_instructions(crop, weeds.ids(), settings.max_tool_calls), tools=TOOL_SCHEMAS)
     pending: list[dict] = [user_message(f"Stop {image.index + 1}: one photo of a {crop} field. Boxes are 0 to 1000 "
                                         "on both axes.", [image.work_data_url])]
+    # Everything said so far, replayable on its own: Meta sometimes forgets a response a request chains to.
+    history = list(pending)
     previous = None
+    stateless = False
     nudged = False
     try:
         while not state.finished:
             if state.calls >= settings.max_tool_calls or clock() - state.started > settings.stop_timeout_s:
                 state.log("limit", "Tool-call or time limit reached; closing the stop", ok=False)
                 break
-            turn = llm.turn(pending, instructions=instructions, tools=TOOL_SCHEMAS, previous_response_id=previous)
-            previous = turn.response_id
+            try:
+                turn = llm.turn(list(history) if stateless else pending, previous_response_id=previous, **ask)
+            except BadRequest as error:
+                if previous is None or not is_lost_response(error):
+                    raise
+                state.log("retry", "Muse Spark lost the conversation; resent it in full", ok=False)
+                stateless = True
+                turn = llm.turn(list(history), previous_response_id=None, **ask)  # a second failure ends the stop
+            previous = None if stateless else turn.response_id
+            history += turn.output_items
             if not turn.calls:
                 if nudged:
                     break
                 nudged = True
                 pending = [user_message("Call a tool. If you are done, call measure and then finish.")]
-                continue
-            outputs, images = {}, []
-            for call in run_order(turn.calls):
-                state.calls += 1
-                result = runner.run(call.name, call.arguments)
-                outputs[call.call_id] = result.output
-                images += result.images
-            pending = [{"type": "function_call_output", "call_id": call.call_id, "output": outputs[call.call_id]}
-                       for call in turn.calls]  # answered in the model's own order
-            if images:
-                pending.append(user_message("Close-ups you asked for: " + "; ".join(c for c, _ in images),
-                                            [url for _, url in images]))
+            else:
+                outputs, images = {}, []
+                for call in run_order(turn.calls):
+                    state.calls += 1
+                    result = runner.run(call.name, call.arguments)
+                    outputs[call.call_id] = result.output
+                    images += result.images
+                pending = [{"type": "function_call_output", "call_id": call.call_id, "output": outputs[call.call_id]}
+                           for call in turn.calls]  # answered in the model's own order
+                if images:
+                    pending.append(user_message("Close-ups you asked for: " + "; ".join(c for c, _ in images),
+                                                [url for _, url in images]))
+            history += pending
         return finalize(state, sam), state
     except Exception as error:  # StopFailed, BadRequest, LlmError, timeouts, dropped connections: this stop only
         state.log("error", f"{type(error).__name__}: {error}", ok=False)
