@@ -1254,8 +1254,11 @@ class SamClient:
 
         def send(payload: dict) -> str:
             response = client.responses.create(**payload)
-            if not response.output_text:
-                log.warning("SAM reply had no output_text (status=%s, items=%s)", response.status,
+            parts = [part for item in response.output if getattr(item, "type", None) == "message"
+                     for part in getattr(item, "content", None) or []]
+            if not any(getattr(part, "type", None) == "output_text" for part in parts):
+                # An empty output_text part is SAM's normal "no match"; a missing one means an unexpected reply shape.
+                log.warning("SAM reply had no output_text part (status=%s, items=%s)", response.status,
                             [getattr(item, "type", "?") for item in response.output])
             return response.output_text
 
@@ -1562,7 +1565,9 @@ git commit -m "chore: SAM 3.1 test script and notes"
 ```python
 from types import SimpleNamespace as NS
 
-from scout.agent.llm import Llm, user_message
+import pytest
+
+from scout.agent.llm import Llm, LlmError, user_message
 
 
 def _response(output, text="", rid="resp_1"):
@@ -1609,6 +1614,35 @@ def test_user_message_with_images_and_file():
     msg = user_message("look", ["data:image/jpeg;base64,AAA"], file=("label.pdf", "data:application/pdf;base64,BBB"))
     assert [part["type"] for part in msg["content"]] == ["input_text", "input_image", "input_file"]
     assert msg["role"] == "user" and msg["type"] == "message"
+
+
+@pytest.mark.parametrize("raw", ["{not json", "[]", '"x"', "null", "5"])
+def test_non_object_arguments_are_flagged(raw):
+    create = lambda **k: _response([NS(type="function_call", call_id="c1", name="zoom", arguments=raw)])
+    assert Llm(create, "m").turn("x").calls[0].arguments == {"__invalid__": raw}
+
+
+def test_unfinished_response_raises():
+    create = lambda **k: NS(id="r", output=[], output_text="", status="incomplete",
+                            incomplete_details=NS(reason="max_output_tokens"), error=None)
+    with pytest.raises(LlmError, match="incomplete"):
+        Llm(create, "m").turn("x")
+
+
+def test_real_sdk_response_is_parsed():
+    from openai._models import construct_type
+    from openai.types.responses import Response
+    response = construct_type(type_=Response, value={
+        "id": "resp_1", "object": "response", "created_at": 0, "model": "m", "status": "completed",
+        "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+        "output": [{"type": "reasoning", "id": "rs_1", "summary": []},
+                   {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "zoom",
+                    "arguments": '{"instance_id": "s0-i1"}', "status": "completed"},
+                   {"type": "message", "id": "m1", "role": "assistant", "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}]}]})
+    turn = Llm(lambda **k: response, "m").turn("x")
+    assert turn.response_id == "resp_1" and turn.text == "done"
+    assert [(c.call_id, c.name, c.arguments) for c in turn.calls] == [("c1", "zoom", {"instance_id": "s0-i1"})]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1627,6 +1661,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from scout.retry import with_retry
+
+
+class LlmError(RuntimeError):
+    """Muse Spark answered, but the response did not complete (failed, incomplete, or cancelled)."""
 
 
 @dataclass
@@ -1680,6 +1718,10 @@ class Llm:
         if text_format:
             kwargs["text"] = {"format": text_format}
         response = with_retry(lambda: self._create(**kwargs), sleep=self._sleep)
+        status = getattr(response, "status", None)
+        if status in ("failed", "incomplete", "cancelled"):
+            detail = getattr(response, "incomplete_details", None) or getattr(response, "error", None)
+            raise LlmError(f"Muse Spark response {response.id} was {status}: {detail}")
         calls = []
         for item in response.output:
             if getattr(item, "type", None) != "function_call":
@@ -1687,6 +1729,8 @@ class Llm:
             try:
                 arguments = json.loads(item.arguments or "{}")
             except json.JSONDecodeError:
+                arguments = None
+            if not isinstance(arguments, dict):  # tools are called with **arguments, so only an object is usable
                 arguments = {"__invalid__": item.arguments}
             calls.append(ToolCall(item.call_id, item.name, arguments))
         return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "")
@@ -1695,7 +1739,7 @@ class Llm:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_llm.py -v`
-Expected: 4 passed
+Expected: 11 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1732,7 +1776,7 @@ TOOL = {
     "name": "report_rows",
     "description": "Report how many crop rows are visible.",
     "parameters": {"type": "object", "properties": {"count": {"type": "integer"}, "notes": {"type": "string"}},
-                   "required": ["count", "notes"], "additionalProperties": False},
+                   "required": ["count"], "additionalProperties": False},
 }
 SCHEMA = {
     "type": "json_schema", "name": "plants", "strict": True,
@@ -2667,7 +2711,7 @@ class ToolRunner:
             return ToolResult(f"error: unknown tool or malformed arguments for {name}")
         try:
             return handler(**args)
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError, KeyError) as error:
             self.state.log(name, f"Rejected: {error}", ok=False)
             return ToolResult(f"error: {error}")
         except BadRequest as error:
