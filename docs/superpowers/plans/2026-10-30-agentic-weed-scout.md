@@ -1631,6 +1631,8 @@ git commit -m "chore: SAM 3.1 test script and notes"
 
 ### Task 10: Muse Spark wrapper
 
+Meta sometimes answers a chained request with `400 referenced response not found or expired`. So each `LlmTurn` also carries `output_items`: the response's function calls (with their raw argument strings) and assistant text as input items that can be replayed without `previous_response_id`. Reasoning items are left out. `is_lost_response` recognizes that error; the stop agent (Task 17) uses both to resend the conversation.
+
 **Files:**
 - Create: `scout/agent/llm.py`
 - Test: `tests/test_llm.py`
@@ -1643,7 +1645,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from scout.agent.llm import Llm, LlmError, user_message
+from scout.agent.llm import Llm, LlmError, LlmTurn, is_lost_response, user_message
+from scout.retry import BadRequest
 
 
 def _response(output, text="", rid="resp_1"):
@@ -1719,6 +1722,38 @@ def test_real_sdk_response_is_parsed():
     turn = Llm(lambda **k: response, "m").turn("x")
     assert turn.response_id == "resp_1" and turn.text == "done"
     assert [(c.call_id, c.name, c.arguments) for c in turn.calls] == [("c1", "zoom", {"instance_id": "s0-i1"})]
+
+
+def test_output_items_can_be_replayed_as_input():
+    from openai._models import construct_type
+    from openai.types.responses import Response
+    response = construct_type(type_=Response, value={
+        "id": "resp_1", "object": "response", "created_at": 0, "model": "m", "status": "completed",
+        "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+        "output": [{"type": "reasoning", "id": "rs_1", "summary": []},
+                   {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "zoom",
+                    "arguments": '{"instance_id":  "s0-i1"}', "status": "completed"},
+                   {"type": "message", "id": "m1", "role": "assistant", "status": "completed",
+                    "content": [{"type": "output_text", "text": "looking", "annotations": []}]}]})
+    turn = Llm(lambda **k: response, "m").turn("x")
+    assert turn.output_items == [
+        {"type": "function_call", "call_id": "c1", "name": "zoom", "arguments": '{"instance_id":  "s0-i1"}'},
+        {"role": "assistant", "content": "looking"}]  # the raw argument string; reasoning is left out
+
+
+def test_output_items_default_to_empty():
+    assert LlmTurn("r1", [], "").output_items == []
+    turn = Llm(lambda **k: _response([NS(type="reasoning")]), "m").turn("x")
+    assert turn.output_items == []
+
+
+def test_is_lost_response():
+    lost = BadRequest("Error code: 400 - {'error': {'message': 'referenced response not found or expired', "
+                      "'type': 'invalid_request_error'}}")
+    assert is_lost_response(lost)
+    assert is_lost_response(BadRequest("Referenced Response Not Found"))
+    assert not is_lost_response(BadRequest("image too large"))
+    assert not is_lost_response(ValueError("referenced response not found or expired"))  # only a rejected request
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1733,10 +1768,10 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.agent.llm'`
 """Thin wrapper over the Responses API for Muse Spark: one call = one LlmTurn."""
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from scout.retry import with_retry
+from scout.retry import BadRequest, with_retry
 
 
 class LlmError(RuntimeError):
@@ -1755,6 +1790,14 @@ class LlmTurn:
     response_id: str
     calls: list[ToolCall]
     text: str
+    # The response's output as input items that can be replayed without previous_response_id: function calls with
+    # their raw argument strings, and assistant text. Reasoning items are left out.
+    output_items: list[dict] = field(default_factory=list)
+
+
+def is_lost_response(error: Exception) -> bool:
+    """Meta sometimes forgets a response a request chains to: 400 "referenced response not found or expired"."""
+    return isinstance(error, BadRequest) and "referenced response not found" in str(error).lower()
 
 
 def user_message(text: str, image_urls: Sequence[str] = (), file: tuple[str, str] | None = None) -> dict:
@@ -1798,24 +1841,30 @@ class Llm:
         if status in ("failed", "incomplete", "cancelled"):
             detail = getattr(response, "incomplete_details", None) or getattr(response, "error", None)
             raise LlmError(f"Muse Spark response {response.id} was {status}: {detail}")
-        calls = []
+        calls, items = [], []
         for item in response.output:
-            if getattr(item, "type", None) != "function_call":
-                continue
-            try:
-                arguments = json.loads(item.arguments or "{}")
-            except json.JSONDecodeError:
-                arguments = None
-            if not isinstance(arguments, dict):  # tools are called with **arguments, so only an object is usable
-                arguments = {"__invalid__": item.arguments}
-            calls.append(ToolCall(item.call_id, item.name, arguments))
-        return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "")
+            kind = getattr(item, "type", None)
+            if kind == "message" and getattr(item, "role", "assistant") == "assistant":
+                text = "".join(part.text for part in item.content or [] if getattr(part, "type", None) == "output_text")
+                if text:
+                    items.append({"role": "assistant", "content": text})
+            elif kind == "function_call":
+                try:
+                    arguments = json.loads(item.arguments or "{}")
+                except json.JSONDecodeError:
+                    arguments = None
+                if not isinstance(arguments, dict):  # tools are called with **arguments, so only an object is usable
+                    arguments = {"__invalid__": item.arguments}
+                calls.append(ToolCall(item.call_id, item.name, arguments))
+                items.append({"type": "function_call", "call_id": item.call_id, "name": item.name,
+                              "arguments": item.arguments or "{}"})
+        return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "", items)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_llm.py -v`
-Expected: 11 passed
+Expected: 14 passed
 
 - [ ] **Step 5: Commit**
 
@@ -2668,8 +2717,9 @@ Tasks 15–17 follow the boxes redesign (`docs/superpowers/specs/2026-10-30-boxe
 - Box conversion between the agent's 0–1000 coordinates and work-image pixels.
 - The weed check:
   - A weed mask that lies mostly (≥ 60%) on separate crop plants is dropped.
-  - Row canopies never veto a weed, since a weed inside the row sits wholly in the canopy mask.
-  - Weeds that overlap any crop by more than 30%, and patches over 12% of the frame, are kept with `check_this`.
+  - Row canopies never veto a plant-sized weed, since a weed inside the row sits wholly in the canopy mask.
+  - A patch-sized weed mask (over 12% of the frame) that lies ≥ 50% on any crop, canopy included, is crop foliage near the camera, not a weed patch, and is dropped.
+  - Weeds that overlap any crop by more than 30%, and the patches that stay, are kept with `check_this`.
 - A patch makes the count approximate, except in a close-up, where a big weed is just a big plant.
 - Sky for row and wide views (`ensure_sky`): asked once and best effort. Without it, cover is measured over the whole photo.
 - The in-row zone, and the overlay, where weeds win over crop.
@@ -2804,6 +2854,17 @@ def test_large_weed_mask_is_kept_as_an_approximate_patch():
     assert state.has_patch() and state.count_approximate()
 
 
+def test_patch_sized_weed_mostly_on_any_crop_is_dropped_even_inside_a_canopy():
+    state, scene = _state(), field_scene()
+    canopy = state.add_mask(scene["row"], "prompt", "soybean row", role="crop")
+    assert state.is_canopy(canopy)
+    assert state.add_weed(rect(10, 0, 30, 80), "prompt", "weed patch") is None  # 16% of the frame, all on the canopy
+    assert state.add_weed(rect(0, 0, 50, 30), "prompt", "weed patch") is not None  # 15%, but only 40% on the canopy
+    small = state.add_weed(rect(12, 50, 22, 60), "prompt", "leaf in the row")  # the same canopy, a plant-sized mark
+    assert small is not None and small.role == "weed" and small.check_this and not state.is_patch(small)
+    assert list(state.instances) == [canopy.id, "s0-i2", small.id]
+
+
 def test_row_band_from_a_row_canopy_leaves_out_sky():
     state = _state()
     assert state.row_band() is None  # no crop yet
@@ -2924,6 +2985,7 @@ CANOPY_SPAN_FRAC = 1 / 3  # a crop mask this long (share of the image's long sid
 MOSTLY_CROP = 0.6  # a weed mask this much on crop plants is a crop hit and is dropped
 CHECK_OVERLAP = 0.3  # a weed mask this much on any crop is kept but flagged for a closer look
 PATCH_FRAC = 0.12  # a weed mask over 12% of the frame is a patch of plants: kept as one, flagged, count approximate
+PATCH_MOSTLY_CROP = 0.5  # a patch this much on any crop (canopy too) is crop foliage, not a weed patch: dropped
 MAX_BOXES = 16  # SAM takes at most 16 objects per request
 
 
@@ -3007,24 +3069,32 @@ class StopState:
         left, top, right, bottom = inst.box
         return max(right - left, bottom - top) >= CANOPY_SPAN_FRAC * max(self.size)
 
-    def is_patch(self, inst: Instance) -> bool:
+    def _patch_sized(self, area_px: int) -> bool:
         width, height = self.size
-        return inst.area_px > PATCH_FRAC * width * height
+        return area_px > PATCH_FRAC * width * height
+
+    def is_patch(self, inst: Instance) -> bool:
+        return self._patch_sized(inst.area_px)
 
     def add_weed(self, mask: np.ndarray, source: str, prompt: str, confidence: float | None = None) -> Instance | None:
-        """Register a weed mask, or return None when it mostly lies on crop plants (a box drawn on crop).
+        """Register a weed mask, or return None when it mostly lies on crop (a box drawn on crop).
 
-        Only separate crop plants can veto a weed: a weed growing inside a row sits almost wholly in the row-canopy
-        mask, so canopy overlap only flags it. Weeds overlapping any crop, and large patches, get check_this.
+        Only separate crop plants can veto a plant-sized weed: a weed growing inside a row sits almost wholly in the
+        row-canopy mask, so canopy overlap only flags it. A patch-sized mask is different: a box that big, mostly on
+        any crop, canopy included, is crop foliage near the camera, so it is dropped. Weeds overlapping any crop,
+        and the patches that stay, get check_this.
         """
         area = max(int(mask.sum()), 1)
         plants = self.union_of(lambda i: i.role == "crop" and not self.is_canopy(i))
         if float((mask & plants).sum()) / area >= MOSTLY_CROP:
             return None
         crop = self.union_of(lambda i: i.role == "crop")
+        crop_share = float((mask & crop).sum()) / area
+        patch = self._patch_sized(area)
+        if patch and crop_share >= PATCH_MOSTLY_CROP:
+            return None
         inst = self.add_mask(mask, source, prompt, role="weed", confidence=confidence)
-        on_crop = float((mask & crop).sum()) / area > CHECK_OVERLAP
-        inst.check_this = bool(inst.check_this or on_crop or self.is_patch(inst))
+        inst.check_this = bool(inst.check_this or crop_share > CHECK_OVERLAP or patch)
         return inst
 
     def unclassified(self) -> list[str]:
@@ -3078,7 +3148,7 @@ class StopState:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_state.py -v`
-Expected: 12 passed
+Expected: 13 passed
 
 - [ ] **Step 5: Commit**
 
@@ -3627,7 +3697,7 @@ Muse Spark takes 13–16 s per turn, so the prompt aims for 6 turns or fewer wit
 3. Classify every weed in one call.
 4. Measure, then finish. Classify, measure and finish can share one turn.
 
-Within a turn, crop `mark`/`segment` calls run first, so the weed check sees the crop. Then come the other tools, then `measure`, then `finish`. Outputs still go back in the model's order. `run_stop` turns any exception (`StopFailed`, `BadRequest`, `LlmError`, timeouts, dropped connections) into a failed stop that keeps its step log, so one bad stop never takes down the walk. A stop where the agent never produced an instance or ran `measure` is also `failed`, not `no_crop_found`. `finalize` keeps marked-but-unclassified weeds as weeds with `check_this`. An alfalfa stop needs no crop boxes to count, because alfalfa is solid-seeded.
+Within a turn, crop `mark`/`segment` calls run first, so the weed check sees the crop. Then come the other tools, then `measure`, then `finish`. Outputs still go back in the model's order. `run_stop` turns any exception (`StopFailed`, `BadRequest`, `LlmError`, timeouts, dropped connections) into a failed stop that keeps its step log, so one bad stop never takes down the walk. If Meta forgets the conversation (`referenced response not found or expired`), the loop resends that turn once with the full history (the first message, every turn's replayable output items, and the items answering them) and no `previous_response_id`, logs a `retry` step, and stays stateless for the rest of the stop. A second failure fails the stop as before. A stop where the agent never produced an instance or ran `measure` is also `failed`, not `no_crop_found`. `finalize` keeps marked-but-unclassified weeds as weeds with `check_this`. An alfalfa stop needs no crop boxes to count, because alfalfa is solid-seeded.
 
 **Files:**
 - Create: `scout/agent/prompts.py`, `scout/agent/stop_agent.py`
@@ -3659,6 +3729,7 @@ class FakeLlm:
 `tests/test_stop_agent.py`:
 ```python
 import itertools
+import json
 from dataclasses import replace
 
 from scout.agent.llm import LlmError, LlmTurn, ToolCall
@@ -3785,6 +3856,69 @@ def test_model_errors_fail_the_stop_and_keep_steps():
         assert result.status == "failed" and [s.tool for s in result.steps] == ["mark", "error"]
 
 
+LOST = BadRequest("Error code: 400 - {'error': {'message': 'referenced response not found or expired', "
+                  "'type': 'invalid_request_error'}}")
+
+
+def _turn(response_id, calls):
+    """A turn whose output items replay its calls, as a real Llm.turn fills them."""
+    items = [{"type": "function_call", "call_id": c.call_id, "name": c.name, "arguments": json.dumps(c.arguments)}
+             for c in calls]
+    return LlmTurn(response_id, calls, "", items)
+
+
+def _kinds(items):
+    return [item.get("type") or item["role"] for item in items]
+
+
+def test_a_lost_conversation_is_resent_in_full_and_the_stop_goes_on_stateless():
+    zoom = ToolCall("c3", "zoom", {"instance_id": "s0-i4"})
+    llm = FakeLlm([_turn("r1", [MARK_CROP, MARK_WEEDS]), LOST, _turn("r2", [zoom]),
+                   _turn("r3", [_classify("s0-i3", "s0-i4"), *_close()])])
+    result, state = _run(llm)
+    assert result.status == "ok" and state.finished and result.weed_count == 2
+    first, lost, retry, last = llm.requests
+    assert first["previous_response_id"] is None and lost["previous_response_id"] == "r1"
+    assert retry["previous_response_id"] is None  # the same turn, resent without the chain
+    assert retry["input"][0] == first["input"][0]  # starts with the photo message
+    assert _kinds(retry["input"]) == ["message", "function_call", "function_call",
+                                      "function_call_output", "function_call_output"]
+    assert [i["call_id"] for i in retry["input"][1:3]] == [i["call_id"] for i in retry["input"][3:]] == ["c1", "c2"]
+    assert retry["input"][1]["name"] == "mark" and json.loads(retry["input"][1]["arguments"])["kind"] == "crop"
+    assert retry["input"][3:] == lost["input"]  # exactly the items the lost request carried
+    assert last["previous_response_id"] is None  # the rest of the stop stays stateless
+    assert last["input"][:5] == retry["input"]  # the history only grows
+    assert _kinds(last["input"][5:]) == ["function_call", "function_call_output", "message"]
+    assert [i["call_id"] for i in last["input"][5:7]] == ["c3", "c3"]  # the zoom call, its output, then the close-up
+    retries = [s for s in result.steps if s.tool == "retry"]
+    assert [(s.ok, s.summary) for s in retries] == [(False, "Muse Spark lost the conversation; resent it in full")]
+
+
+def test_a_second_failure_after_the_resend_fails_the_stop_and_keeps_steps():
+    llm = FakeLlm([_turn("r1", [MARK_CROP]), LOST, LOST])
+    result, _ = _run(llm)
+    assert result.status == "failed" and len(llm.requests) == 3  # one resend only
+    assert [s.tool for s in result.steps] == ["mark", "retry", "error"]
+
+
+def test_a_resent_history_keeps_assistant_text_and_the_nudge():
+    prose = LlmTurn("r1", [], "I see weeds.", [{"role": "assistant", "content": "I see weeds."}])
+    llm = FakeLlm([prose, LOST, _turn("r2", [MARK_CROP]), _turn("r3", _close("top_down"))])
+    result, _ = _run(llm)
+    assert result.status == "ok"
+    retry = llm.requests[2]
+    assert _kinds(retry["input"]) == ["message", "assistant", "message"]  # photo, its own text, the nudge
+    assert retry["input"][1] == {"role": "assistant", "content": "I see weeds."}
+    assert retry["input"][2]["content"][0]["text"].startswith("Call a tool")
+
+
+def test_a_stateless_stop_does_not_resend_again():
+    llm = FakeLlm([_turn("r1", [MARK_CROP]), LOST, _turn("r2", [MARK_WEEDS]), LOST])
+    result, _ = _run(llm)
+    assert result.status == "failed" and len(llm.requests) == 4
+    assert [s.tool for s in result.steps].count("retry") == 1
+
+
 def test_prose_reply_is_nudged_then_fails_the_stop():
     llm = FakeLlm([LlmTurn("r1", [], "I think there are weeds."), LlmTurn("r2", [], "Still prose.")])
     result, _ = _run(llm)
@@ -3861,6 +3995,8 @@ def test_instructions_use_thousandths_and_crop_hints():
     assert "crop boxes are optional" not in soybean
     assert "no weeds" in soybean and '"yellow flower"' in soybean and '"flower"' not in soybean  # alfalfa blooms
     assert "estimate" in soybean and "null" in soybean
+    assert "close to the camera" in soybean and "close to the camera" in alfalfa
+    assert "hug each row's plants" in soybean
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -3891,7 +4027,10 @@ Procedure (aim for 6 turns or fewer):
 1. In your first turn, call mark with kind "crop" and mark with kind "weed"; both calls can go in the same turn. \
 {crop_boxes} For the weeds, give a tight box around every weed, one box per plant, nearest or largest first, at \
 most 16. If you see no weeds, skip the weed mark: never box crop, soil or residue as a weed. A distinctive \
-flowering weed can also be found by phrase: segment "dandelion" or "yellow flower" with kind "weed".
+flowering weed can also be found by phrase: segment "dandelion" or "yellow flower" with kind "weed". \
+Crop leaves close to the camera (the bottom of a row photo) are crop: box a weed only where you see the whole \
+weed plant, distinct from the crop. Crop boxes hug each row's plants; don't stretch them over the soil between \
+rows.
 2. Read the results: "mostly crop" means that box was on crop and was dropped; "nothing found" means SAM found no \
 plant there. Zoom on at most 2 doubtful instances (check_this is true); each close-up arrives at your next turn. If \
 you missed weeds, mark them once more.
@@ -3923,7 +4062,7 @@ example rotating herbicide groups). Use only numbers that appear in the JSON. Do
 import time
 from typing import Callable
 
-from scout.agent.llm import Llm, ToolCall, user_message
+from scout.agent.llm import Llm, ToolCall, is_lost_response, user_message
 from scout.agent.prompts import stop_instructions
 from scout.agent.state import StopState
 from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
@@ -3931,6 +4070,7 @@ from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import StopImage
 from scout.config import Settings
 from scout.models import AgentStep, Instance, StopResult
+from scout.retry import BadRequest
 from scout.vision.measure import compute_metrics
 
 FAILED_FLAG = "This stop could not be analyzed"
@@ -3957,35 +4097,47 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
              clock: Callable[[], float] = time.monotonic) -> tuple[StopResult, StopState]:
     state = StopState(image, crop, on_step=on_step, clock=clock)
     runner = ToolRunner(state, sam, weeds, max_calls=settings.max_tool_calls)
-    instructions = stop_instructions(crop, weeds.ids(), settings.max_tool_calls)
+    ask = dict(instructions=stop_instructions(crop, weeds.ids(), settings.max_tool_calls), tools=TOOL_SCHEMAS)
     pending: list[dict] = [user_message(f"Stop {image.index + 1}: one photo of a {crop} field. Boxes are 0 to 1000 "
                                         "on both axes.", [image.work_data_url])]
+    # Everything said so far, replayable on its own: Meta sometimes forgets a response a request chains to.
+    history = list(pending)
     previous = None
+    stateless = False
     nudged = False
     try:
         while not state.finished:
             if state.calls >= settings.max_tool_calls or clock() - state.started > settings.stop_timeout_s:
                 state.log("limit", "Tool-call or time limit reached; closing the stop", ok=False)
                 break
-            turn = llm.turn(pending, instructions=instructions, tools=TOOL_SCHEMAS, previous_response_id=previous)
-            previous = turn.response_id
+            try:
+                turn = llm.turn(list(history) if stateless else pending, previous_response_id=previous, **ask)
+            except BadRequest as error:
+                if previous is None or not is_lost_response(error):
+                    raise
+                state.log("retry", "Muse Spark lost the conversation; resent it in full", ok=False)
+                stateless = True
+                turn = llm.turn(list(history), previous_response_id=None, **ask)  # a second failure ends the stop
+            previous = None if stateless else turn.response_id
+            history += turn.output_items
             if not turn.calls:
                 if nudged:
                     break
                 nudged = True
                 pending = [user_message("Call a tool. If you are done, call measure and then finish.")]
-                continue
-            outputs, images = {}, []
-            for call in run_order(turn.calls):
-                state.calls += 1
-                result = runner.run(call.name, call.arguments)
-                outputs[call.call_id] = result.output
-                images += result.images
-            pending = [{"type": "function_call_output", "call_id": call.call_id, "output": outputs[call.call_id]}
-                       for call in turn.calls]  # answered in the model's own order
-            if images:
-                pending.append(user_message("Close-ups you asked for: " + "; ".join(c for c, _ in images),
-                                            [url for _, url in images]))
+            else:
+                outputs, images = {}, []
+                for call in run_order(turn.calls):
+                    state.calls += 1
+                    result = runner.run(call.name, call.arguments)
+                    outputs[call.call_id] = result.output
+                    images += result.images
+                pending = [{"type": "function_call_output", "call_id": call.call_id, "output": outputs[call.call_id]}
+                           for call in turn.calls]  # answered in the model's own order
+                if images:
+                    pending.append(user_message("Close-ups you asked for: " + "; ".join(c for c, _ in images),
+                                                [url for _, url in images]))
+            history += pending
         return finalize(state, sam), state
     except Exception as error:  # StopFailed, BadRequest, LlmError, timeouts, dropped connections: this stop only
         state.log("error", f"{type(error).__name__}: {error}", ok=False)
@@ -4035,7 +4187,7 @@ def finalize(state: StopState, sam) -> StopResult:
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_stop_agent.py -v`
-Expected: 16 passed
+Expected: 20 passed
 
 - [ ] **Step 6: Run the whole suite and commit**
 
