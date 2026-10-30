@@ -1342,10 +1342,10 @@ git commit -m "feat: add SAM 3.1 client with cache and retries"
 import numpy as np
 from PIL import Image
 
-from scout.vision.overlay import render_overlay
+from scout.vision.overlay import FLAG_RGB, render_overlay
 
 
-def test_overlay_tints_crop_green_weed_red_and_outlines_flags():
+def test_overlay_tints_crop_green_weed_magenta_and_outlines_flags():
     image = Image.new("RGB", (10, 10), (255, 255, 255))
     crop = np.zeros((10, 10), bool)
     crop[0, 0] = True
@@ -1355,8 +1355,21 @@ def test_overlay_tints_crop_green_weed_red_and_outlines_flags():
     r, g, b = out.getpixel((0, 0))
     assert g > r and g > b
     r, g, b = out.getpixel((9, 9))
-    assert r > g and r > b
-    assert out.getpixel((4, 4)) == (163, 45, 45)
+    assert r > g and b > g
+    assert out.getpixel((4, 4)) == FLAG_RGB
+    assert out.getpixel((5, 5)) == (255, 255, 255)
+
+
+def test_overlay_shades_band_under_plants_and_skips_empty_boxes():
+    image = Image.new("RGB", (10, 10), (255, 255, 255))
+    band = np.zeros((10, 10), bool)
+    band[:, 0] = True
+    weed = np.zeros((10, 10), bool)
+    weed[0, 0] = True
+    out = render_overlay(image, np.zeros((10, 10), bool), weed, band, flagged=[(0, 0, 0, 0)])
+    assert out.getpixel((0, 5)) == (225, 225, 223)
+    r, g, b = out.getpixel((0, 0))
+    assert r > g and b > g
     assert out.getpixel((5, 5)) == (255, 255, 255)
 ```
 
@@ -1369,16 +1382,19 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.vision.overlay'
 
 `scout/vision/overlay.py`:
 ```python
-"""Draw crop (green), weeds (red), the in-row band (gray), and boxes around plants that need a check."""
+"""Draw crop (green), weeds (magenta), the in-row band (gray), and boxes around plants that need a check.
+
+Weeds are magenta, not red: red over green leaves turns olive for red-green color-blind viewers, the same as the crop.
+"""
 import numpy as np
 from PIL import Image, ImageDraw
 
 from scout.models import Box
 
 CROP_RGB = (99, 153, 34)
-WEED_RGB = (226, 75, 74)
+WEED_RGB = (230, 0, 170)
 BAND_RGB = (136, 135, 128)
-FLAG_RGB = (163, 45, 45)
+FLAG_RGB = (255, 214, 0)
 
 
 def render_overlay(image: Image.Image, crop: np.ndarray, weed: np.ndarray,
@@ -1389,15 +1405,17 @@ def render_overlay(image: Image.Image, crop: np.ndarray, weed: np.ndarray,
             out[mask] = out[mask] * (1 - alpha) + np.array(rgb, dtype=np.float32) * alpha
     result = Image.fromarray(out.clip(0, 255).astype(np.uint8))
     draw = ImageDraw.Draw(result)
+    width = max(3, round(max(result.size) / 200))  # 5 px on a 1024 px photo: still visible when shown phone-width
     for left, top, right, bottom in flagged:
-        draw.rectangle((left, top, right - 1, bottom - 1), outline=FLAG_RGB, width=3)
+        if right > left and bottom > top:  # an empty mask's bbox is (0, 0, 0, 0)
+            draw.rectangle((left, top, right - 1, bottom - 1), outline=FLAG_RGB, width=width)
     return result
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_overlay.py -v`
-Expected: 1 passed
+Expected: 2 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1502,7 +1520,7 @@ Expected: one line per prompt with counts and timings, and PNGs in `spike_out/`.
 
 - [ ] **Step 5: Decide go/no-go and write it down**
 
-Open the `*__candidates.png` files. **Go** if, on at least 4 of the 6 photos, the red pieces mostly sit on weeds rather than on crop, and most visible weeds (grasses included) carry some red. **No-go:** try `--extra "weed" "seedling" "green plant"` on the failures.
+Open the `*__candidates.png` files. **Go** if, on at least 4 of the 6 photos, the magenta pieces mostly sit on weeds rather than on crop, and most visible weeds (grasses included) carry some magenta. **No-go:** try `--extra "weed" "seedling" "green plant"` on the failures.
 
 If the "plant" concept is still poor, adopt the fallback (spec §8.2.3). The agent marks points on weeds in the full photo and calls `segment_at`. The tools in Task 16 already support this; strengthen `prompts.py` step 3 wording in Task 17.
 
@@ -2418,7 +2436,9 @@ class StopState:
 
     def add_records(self, records: list[SamRecord], source: str, prompt: str, role: str = "unknown",
                     kind: str | None = None) -> list[Instance]:
-        return [self.add_mask(r.full_mask(self.size), source, prompt, role, r.confidence, kind) for r in records]
+        pairs = [(r, r.full_mask(self.size)) for r in records]
+        # A record that clips to nothing (off-image box, all-zero raster) would become a pixel-less "check this" flag.
+        return [self.add_mask(m, source, prompt, role, r.confidence, kind) for r, m in pairs if m.any()]
 
     def union_of(self, predicate: Callable[[Instance], bool]) -> np.ndarray:
         return mk.union([self.masks[i.id] for i in self.instances.values() if predicate(i)], self.size)
@@ -4373,10 +4393,11 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.report.render'`
 {% endif %}
 
 <h2>Stops</h2>
+<p>Green: crop · Magenta: weeds · Gray: in-row zone · Yellow box: check this plant</p>
 <div class="stops">
 {% for s in report.stops %}
   <div class="card">
-    <img src="{{ overlay_url(s.stop_index) }}" alt="Stop {{ s.stop_index + 1 }}: crop in green, weeds in red">
+    <img src="{{ overlay_url(s.stop_index) }}" alt="Stop {{ s.stop_index + 1 }}: crop in green, weeds in magenta">
     <b>Stop {{ s.stop_index + 1 }}</b>
     <span class="muted">{{ s.view_type.replace("_", " ") }}{% if s.crop_stage %} · crop {{ s.crop_stage }}{% endif %} · {{ s.status.replace("_", " ") }}</span>
     <p>Weed cover {{ s.weed_cover_pct }}% · {{ s.weed_count }} weeds{% if s.count_approximate %} (approx.){% endif %}{% if s.density_per_m2 is not none %} · {{ s.density_per_m2 }}/m²{% endif %}</p>
@@ -5215,7 +5236,7 @@ git commit -m "feat: add agreement check against hand labels"
 0:00–0:20  Problem: scouting means walking a field, counting weeds per stop, and matching products to labels by hand.
 0:20–1:20  Live: upload a 6-photo soybean walk on the deployed URL. Agent steps stream: segment crop, segment
            plants, zoom on a doubtful plant, identify waterhemp ~3 in, measure.
-1:20–2:10  Report: overlays (crop green, weeds red), cover/density/frequency cards, decision "Treat (spot)",
+1:20–2:10  Report: overlays (crop green, weeds magenta), cover/density/frequency cards, decision "Treat (spot)",
            rule trace, label options; click "p. N" to open the EPA label at the cited page.
 2:10–2:45  Under the hood: Muse Spark <-> SAM 3.1 loop (concept prompts, point prompts, confidence); code computes
            every number; label table built from EPA PDFs with verified quotes. Show the agreement rate.

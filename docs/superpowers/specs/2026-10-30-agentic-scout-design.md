@@ -51,7 +51,7 @@ From the official participant guide (cerebralvalley.ai/e/meta-ai-developer-hacka
 2. **Upload 1–10 photos** from one visit (JPG, PNG, HEIC). If a photo carries GPS, its stop gets a map pin.
 3. **Watch the agent work.** The page streams each stop's steps: segment, find candidates, zoom, identify, measure.
 4. **Read the report:**
-   - Per stop: overlay (crop green, weeds red, in-row zone shaded), measures, "check this" flags.
+   - Per stop: overlay (crop green, weeds magenta so red-green color-blind viewers can tell them apart, in-row zone shaded), measures, "check this" flags.
    - Field summary: metric cards (weed cover, density, frequency, decision).
    - Species table.
    - Label-backed options with citations.
