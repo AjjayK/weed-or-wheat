@@ -28,5 +28,5 @@ def with_retry(fn: Callable[[], T], retries: int = 3, sleep: Callable[[float], N
             transient = status in RETRY_STATUS or type(error).__name__ in TRANSIENT_ERRORS
             if not transient or attempt == retries:
                 raise
-            sleep(2 ** attempt)
+            sleep(2 ** attempt * (4 if status == 429 else 1))  # rate limits clear slowly when 4 stops run at once
     raise AssertionError("unreachable")

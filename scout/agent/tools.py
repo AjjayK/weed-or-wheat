@@ -1,5 +1,6 @@
 """The six tools Muse Spark can call at a stop, and the code that runs them. Every box in or out is 0-1000."""
 import json
+import math
 from dataclasses import asdict, dataclass, field
 
 from scout.agent.state import MAX_BOXES, StopFailed, StopState, to_pixels, to_thousandths
@@ -13,11 +14,25 @@ from scout.vision.sam_parse import SamRecord
 
 VIEW_TYPES = ("row", "top_down", "close_up", "wide")
 KINDS = ("crop", "weed")
+CONFIDENCES = ("high", "medium", "low")
 ZOOM_MAX_PX = 768
-MAX_LISTED = 30
+MAX_LISTED = 100
 NOTHING = "nothing found"
 MOSTLY_CROP_NOTE = "mostly crop"
 PATCH_NOTE = "large patch; counted as one, approximate"
+
+
+def _number(value, name: str) -> float | None:
+    """A model-written number (3, 3.5 or "3"); None stays None."""
+    if value is None:
+        return None
+    try:
+        number = math.nan if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError, OverflowError):
+        number = math.nan
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{name} must be a number or null, got {value!r}")
+    return number
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -31,7 +46,7 @@ _BOX = {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems"
 
 TOOL_SCHEMAS = [
     _fn("segment", "Ask SAM 3.1 for every instance of one concept, a short noun phrase. It finds \"crop row\" "
-        "(kind crop) and distinct things such as \"dandelion\" or \"flower\" (kind weed). It does not find crop "
+        "(kind crop) and distinct things such as \"dandelion\" or \"yellow flower\" (kind weed). It does not find crop "
         "plants, leaves, or weeds in general: use mark for those.",
         {"phrase": {"type": "string"}, "kind": {"type": "string", "enum": list(KINDS)}},
         ["phrase", "kind"]),
@@ -149,6 +164,10 @@ class ToolRunner:
         records: dict[str, SamRecord] = {}
         for record in self.sam.segment_boxes(self.state.image, pixel_boxes):
             records.setdefault(record.object_id, record)  # object i + 1 is box i
+        asked = {str(n) for n in range(1, len(boxes) + 1)}
+        unexpected = [object_id for object_id in records if object_id not in asked]
+        if unexpected:
+            self.state.log("mark", f"SAM returned unexpected object ids {unexpected[:5]}", ok=False)
         found, notes = [], []
         for n, label in enumerate(labels, start=1):
             record = records.get(str(n))
@@ -187,22 +206,26 @@ class ToolRunner:
             inst = self.state.instances.get(item["instance_id"])
             if inst is None:
                 raise ValueError(f"unknown instance {item['instance_id']}")
-            if item["role"] not in ("crop", "weed", "ignore"):
-                raise ValueError(f"bad role {item['role']}")
-            species = item.get("species_id")
-            if species is not None and species not in self.weeds:
-                species = self.weeds.resolve(species)
+            role = item["role"]
+            if role not in ("crop", "weed", "ignore"):
+                raise ValueError(f"bad role {role}")
+            species = None
+            named = item.get("species_id")
+            if role == "weed" and named not in (None, ""):  # a crop's name is not a weed species: ignore it
+                species = named if named in self.weeds else self.weeds.resolve(named)
                 if species is None:
-                    raise ValueError(f"unknown species_id {item['species_id']}; use an id from the allowed list or null")
-            resolved.append((inst, item, species))
-        for inst, item, species in resolved:
-            inst.role = item["role"]
-            inst.species_id = species if item["role"] == "weed" else None
-            inst.height_in = item.get("height_in")
-            inst.leaf_count = item.get("leaf_count")
-            inst.id_confidence = item["id_confidence"]
-            inst.check_this = inst.check_this or item["id_confidence"] == "low"
-        weeds = [inst for inst, _, _ in resolved if inst.role == "weed"]
+                    raise ValueError(f"unknown species_id {named}; use an id from the allowed list or null")
+            confidence = item["id_confidence"]
+            if confidence not in CONFIDENCES:
+                raise ValueError(f"id_confidence must be one of {list(CONFIDENCES)}")
+            height = _number(item.get("height_in"), "height_in")
+            leaves = _number(item.get("leaf_count"), "leaf_count")
+            resolved.append((inst, role, species, confidence, height, None if leaves is None else int(leaves)))
+        for inst, role, species, confidence, height, leaves in resolved:
+            inst.role, inst.species_id, inst.id_confidence = role, species, confidence
+            inst.height_in, inst.leaf_count = height, leaves
+            inst.check_this = confidence == "low" or self.state.is_patch(inst)  # a confident verdict clears the flag
+        weeds = [inst for inst, role, *_ in resolved if role == "weed"]
         if len(resolved) == 1 and weeds:
             inst = weeds[0]
             name = self.weeds.get(inst.species_id).common_name if inst.species_id else "unidentified weed"
@@ -211,20 +234,20 @@ class ToolRunner:
             summary = "Identified: " + ", ".join([name] + [d for d in details if d])
         else:
             summary = f"Classified {len(resolved)} plants ({len(weeds)} weeds)"
-        self.state.log("classify", summary, [inst.id for inst, _, _ in resolved])
-        return ToolResult(json.dumps({"ok": [inst.id for inst, _, _ in resolved]}))
+        ids = [inst.id for inst, *_ in resolved]
+        self.state.log("classify", summary, ids)
+        return ToolResult(json.dumps({"ok": ids}))
 
     def _tool_measure(self, view_type: str) -> ToolResult:
         if view_type not in VIEW_TYPES:
             raise ValueError(f"view_type must be one of {list(VIEW_TYPES)}")
         self.state.view_type = view_type
-        if view_type in ("row", "wide") and self.state.sky is None:
-            records = self.sam.segment_concept(self.state.image, "sky")
-            self.state.sky = mk.union([r.full_mask(self.state.size) for r in records], self.state.size)
+        if view_type in ("row", "wide"):
+            self.state.ensure_sky(self.sam)
         metrics = compute_metrics(list(self.state.instances.values()), self.state.masks, self.state.size,
                                   view_type, self.state.sky, self.state.row_band())
         out = asdict(metrics)
-        out["count_approximate"] = metrics.count_approximate or self.state.count_approximate()
+        out["count_approximate"] = metrics.count_approximate or self.state.count_approximate(view_type)
         self.state.log("measure", f"Measure: weed cover {metrics.weed_cover_pct}%, {metrics.weed_count} weeds")
         return ToolResult(json.dumps(out))
 
@@ -236,8 +259,8 @@ class ToolRunner:
         if self.state.view_type is None:
             self.state.log("finish", "Refused: measure has not run", ok=False)
             return ToolResult("error: call measure first")
-        self.state.crop_stage = crop_stage
-        self.state.notes = notes
+        self.state.crop_stage = None if crop_stage is None else (str(crop_stage).strip() or None)
+        self.state.notes = str(notes or "")
         self.state.finished = True
         self.state.log("finish", "Stop closed")
         return ToolResult("ok", finished=True)

@@ -61,6 +61,7 @@ class StopState:
         self.instances: dict[str, Instance] = {}
         self.masks: dict[str, np.ndarray] = {}
         self.sky: np.ndarray | None = None
+        self._sky_tried = False
         self.view_type: str | None = None
         self.crop_stage: str | None = None
         self.notes = ""
@@ -131,9 +132,22 @@ class StopState:
     def has_patch(self) -> bool:
         return any(i.role == "weed" and self.is_patch(i) for i in self.instances.values())
 
-    def count_approximate(self) -> bool:
-        """A patch counts as one weed, and a capped mark may have left weeds unmarked."""
-        return self.has_patch() or self.box_cap_hit
+    def count_approximate(self, view_type: str | None = None) -> bool:
+        """A patch counts as one weed (but a big plant in a close-up is just a plant), and a capped mark may have
+        left weeds unmarked."""
+        return (self.has_patch() and view_type != "close_up") or self.box_cap_hit
+
+    def ensure_sky(self, sam) -> None:
+        """Sky for row and wide views, asked once. Best effort: without it, cover is measured over the whole photo."""
+        if self.sky is not None or self._sky_tried:
+            return
+        self._sky_tried = True
+        try:
+            records = sam.segment_concept(self.image, "sky")
+        except Exception as error:
+            self.log("sky", f"Sky not found ({type(error).__name__}); cover uses the whole photo", ok=False)
+            return
+        self.sky = mk.union([r.full_mask(self.size) for r in records], self.size)
 
     def row_band(self) -> np.ndarray | None:
         """In-row zone: none for alfalfa (solid-seeded) or without crop; the row canopies when any crop mask is

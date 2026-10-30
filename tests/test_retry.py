@@ -25,11 +25,22 @@ def test_retries_transient_then_succeeds():
     def fn():
         calls.append(1)
         if len(calls) < 3:
-            raise StatusError(429)
+            raise StatusError(503)
         return "ok"
 
     assert with_retry(fn, sleep=sleeps.append) == "ok"
     assert sleeps == [1, 2]
+
+
+def test_rate_limit_waits_four_times_longer():
+    sleeps = []
+
+    def fn():
+        raise StatusError(429)
+
+    with pytest.raises(StatusError):
+        with_retry(fn, retries=2, sleep=sleeps.append)
+    assert sleeps == [4, 8]
 
 
 @pytest.mark.parametrize("status", [400, 413, 422])

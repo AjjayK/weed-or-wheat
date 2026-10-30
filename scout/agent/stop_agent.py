@@ -2,22 +2,33 @@
 import time
 from typing import Callable
 
-from scout.agent.llm import Llm, LlmError, ToolCall, user_message
+from scout.agent.llm import Llm, ToolCall, user_message
 from scout.agent.prompts import stop_instructions
-from scout.agent.state import StopFailed, StopState
+from scout.agent.state import StopState
 from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
 from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import StopImage
 from scout.config import Settings
 from scout.models import AgentStep, Instance, StopResult
-from scout.retry import BadRequest
-from scout.vision import masks as mk
 from scout.vision.measure import compute_metrics
 
+FAILED_FLAG = "This stop could not be analyzed"
 
-def crop_first(calls: list[ToolCall]) -> list[ToolCall]:
-    """Crop marks and segments run before the rest of a turn's calls, so the weed check sees the crop."""
-    return sorted(calls, key=lambda c: 0 if c.name in ("mark", "segment") and c.arguments.get("kind") == "crop" else 1)
+
+def run_order(calls: list[ToolCall]) -> list[ToolCall]:
+    """Crop marks and segments run first, so the weed check sees the crop; then the other tools; measure and finish
+    last, so they see the turn's verdicts. The order is stable within each rank."""
+    def rank(call: ToolCall) -> int:
+        if call.name in ("mark", "segment") and call.arguments.get("kind") == "crop":
+            return 0
+        return {"measure": 2, "finish": 3}.get(call.name, 1)
+    return sorted(calls, key=rank)
+
+
+def _failed(state: StopState) -> StopResult:
+    image = state.image
+    return StopResult(stop_index=image.index, image_hash=image.hash, gps=image.gps, steps=state.steps,
+                      flags=[FAILED_FLAG], status="failed")
 
 
 def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settings: Settings,
@@ -44,7 +55,7 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
                 pending = [user_message("Call a tool. If you are done, call measure and then finish.")]
                 continue
             outputs, images = {}, []
-            for call in crop_first(turn.calls):
+            for call in run_order(turn.calls):
                 state.calls += 1
                 result = runner.run(call.name, call.arguments)
                 outputs[call.call_id] = result.output
@@ -54,11 +65,10 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
             if images:
                 pending.append(user_message("Close-ups you asked for: " + "; ".join(c for c, _ in images),
                                             [url for _, url in images]))
-    except (StopFailed, BadRequest, LlmError) as error:
+        return finalize(state, sam), state
+    except Exception as error:  # StopFailed, BadRequest, LlmError, timeouts, dropped connections: this stop only
         state.log("error", f"{type(error).__name__}: {error}", ok=False)
-        return StopResult(stop_index=image.index, image_hash=image.hash, gps=image.gps, steps=state.steps,
-                          flags=["This stop could not be analyzed"], status="failed"), state
-    return finalize(state, sam), state
+        return _failed(state), state
 
 
 def _flag(inst: Instance) -> str:
@@ -71,20 +81,18 @@ def _flag(inst: Instance) -> str:
 
 def finalize(state: StopState, sam) -> StopResult:
     """Weeds that were marked but never classified stay weeds, flagged; measurements are recomputed."""
+    if not state.instances and state.view_type is None:  # the agent got nowhere: its failure, not a stop without crop
+        return _failed(state)
     for inst in state.instances.values():
         if inst.role == "weed" and inst.id_confidence is None:
             inst.check_this = True
     view = state.view_type or "row"
-    if view in ("row", "wide") and state.sky is None:
-        try:
-            records = sam.segment_concept(state.image, "sky")
-            state.sky = mk.union([r.full_mask(state.size) for r in records], state.size)
-        except Exception:  # sky removal is best effort; cover is then measured over the whole photo
-            state.sky = None
+    if view in ("row", "wide"):
+        state.ensure_sky(sam)
     m = compute_metrics(list(state.instances.values()), state.masks, state.size, view, state.sky, state.row_band())
     instances = list(state.instances.values())
     flags = [_flag(i) for i in instances if i.role == "weed" and i.check_this]
-    if m.count_approximate or state.has_patch():
+    if m.count_approximate or (state.has_patch() and view != "close_up"):
         flags.append("Weed count is approximate: some weeds merged into patches")
     if state.box_cap_hit:
         flags.append("Weed count is a floor: a mark call used all 16 boxes")
@@ -94,7 +102,7 @@ def finalize(state: StopState, sam) -> StopResult:
     return StopResult(
         stop_index=state.image.index, image_hash=state.image.hash, view_type=view, gps=state.image.gps,
         crop_stage=state.crop_stage, weed_cover_pct=m.weed_cover_pct, crop_cover_pct=m.crop_cover_pct,
-        weed_count=m.weed_count, count_approximate=m.count_approximate or state.count_approximate(),
+        weed_count=m.weed_count, count_approximate=m.count_approximate or state.count_approximate(view),
         density_per_m2=m.density_per_m2, in_row_weed_share=m.in_row_weed_share, species=m.species,
         species_cover_pct=m.species_cover_pct, species_density=m.species_density,
         species_max_height_in=m.species_max_height_in, max_height_in=m.max_height_in, flags=flags,

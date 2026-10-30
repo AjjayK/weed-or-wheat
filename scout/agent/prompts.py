@@ -16,18 +16,22 @@ Coordinates: every box you give or get is [x1, y1, x2, y2] from 0 to 1000 on bot
 Procedure (aim for 6 turns or fewer):
 1. In your first turn, call mark with kind "crop" and mark with kind "weed"; both calls can go in the same turn. \
 {crop_boxes} For the weeds, give a tight box around every weed, one box per plant, nearest or largest first, at \
-most 16. A distinctive flowering weed can also be found by phrase: segment "dandelion" or "flower" with kind "weed".
-2. Read the results. Zoom on at most 2 doubtful instances (check_this is true). If you missed weeds, mark them \
-once more.
+most 16. If you see no weeds, skip the weed mark: never box crop, soil or residue as a weed. A distinctive \
+flowering weed can also be found by phrase: segment "dandelion" or "yellow flower" with kind "weed".
+2. Read the results: "mostly crop" means that box was on crop and was dropped; "nothing found" means SAM found no \
+plant there. Zoom on at most 2 doubtful instances (check_this is true); each close-up arrives at your next turn. If \
+you missed weeds, mark them once more.
 3. classify every weed instance in one call. Use a species_id from this list only: {", ".join(species_ids)}. Use \
-null when you cannot tell. Give height_in and leaf_count when visible. Use role "crop" for an instance that is \
-really crop and "ignore" for soil, residue, or shadow.
+null when you cannot tell. Give leaf_count when you can count the leaves. height_in is an estimate from visible \
+size cues (a {crop} plant, a leaf, the row spacing): use null when there is no cue. Use role "crop" for an \
+instance that is really crop and "ignore" for soil, residue, or shadow.
 4. measure with the view_type that fits: row (looking along rows), top_down (camera pointing straight down), \
 close_up (a few plants fill the frame), wide (field to the horizon). Then finish with the crop growth stage if \
-you can tell (for example V3) and one sentence of notes. measure and finish can go in the same turn.
+you can tell (for example V3) and one sentence of notes. classify, measure and finish can all go in one turn, in \
+that order; if nothing needs a zoom, do that in your second turn.
 
-Rules: never invent numbers; measurements come only from measure. You have at most {max_calls} tool calls. Always \
-respond with tool calls, not prose. Every coordinate is 0 to 1000."""
+Rules: never invent measurements; cover, counts and density come only from measure. You have at most {max_calls} \
+tool calls. Always respond with tool calls, not prose. Every coordinate is 0 to 1000."""
 
 
 FIELD_INSTRUCTIONS = """You are an agronomist writing the reasoning for a field scouting report. You receive JSON \

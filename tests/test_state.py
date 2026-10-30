@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from scout.agent.state import StopState, to_pixels, to_thousandths
-from tests.helpers import field_scene, make_image, rect
+from tests.helpers import field_scene, make_image, mask_record, rect
 
 
 def _state(crop="soybean"):
@@ -90,3 +90,39 @@ def test_log_reports_steps():
 
 def test_overlay_renders_without_instances():
     assert StopState(make_image(40, 30), "corn").overlay().size == (40, 30)
+
+
+def test_patch_is_approximate_except_in_a_close_up():
+    state = _state()
+    state.add_weed(field_scene()["patch"], "prompt", "foxtail patch")
+    assert state.count_approximate() and state.count_approximate("row") and state.count_approximate("top_down")
+    assert not state.count_approximate("close_up")  # a few big plants fill a close-up
+    state.box_cap_hit = True
+    assert state.count_approximate("close_up")  # a floor, whatever the view
+
+
+class _SkySam:
+    def __init__(self, records=None, error=None):
+        self.records, self.error, self.calls = records or [], error, 0
+
+    def segment_concept(self, image, phrase):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.records
+
+
+def test_ensure_sky_asks_once():
+    state, sam = _state(), _SkySam([mask_record("0", rect(0, 0, 100, 20))])
+    state.ensure_sky(sam)
+    state.ensure_sky(sam)
+    assert sam.calls == 1 and state.sky[10, 50] and not state.sky[50, 50] and state.steps == []
+
+
+def test_ensure_sky_is_best_effort_and_not_retried():
+    state, sam = _state(), _SkySam(error=TimeoutError("timed out"))
+    state.ensure_sky(sam)
+    state.ensure_sky(sam)
+    assert sam.calls == 1 and state.sky is None
+    assert [(s.tool, s.ok) for s in state.steps] == [("sky", False)]
+    assert "TimeoutError" in state.steps[0].summary

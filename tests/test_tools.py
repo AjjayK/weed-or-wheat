@@ -7,6 +7,7 @@ from PIL import Image
 
 from scout.agent.state import StopFailed, StopState
 from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
+from scout.vision.sam_parse import SamRecord
 from tests.helpers import FakeSam, field_scene, make_image, mask_record, rect, small_weedbook
 
 # Boxes as the agent gives them, 0-1000; the test photo is 100x100, so pixels are a tenth of these.
@@ -51,16 +52,16 @@ def test_mark_sends_pixels_in_one_request_and_reports_thousandths():
 def test_segment_phrase_adds_crop_or_checked_weeds():
     scene = field_scene()
     sam = FakeSam(concepts={"crop row": [mask_record("0", scene["row"], 0.7)],
-                            "flower": [mask_record("0", scene["weed_b"]),
+                            "yellow flower": [mask_record("0", scene["weed_b"]),
                                        mask_record("1", scene["plant"] & rect(40, 30, 50, 40))]})
     runner, state = _runner(sam)
     _mark(runner, "crop", PLANT)
     crop = json.loads(runner.run("segment", {"phrase": " crop row ", "kind": "crop"}).output)
     assert crop["total_found"] == 1 and state.instances["s0-i2"].role == "crop"
-    weeds = json.loads(runner.run("segment", {"phrase": "flower", "kind": "weed"}).output)
+    weeds = json.loads(runner.run("segment", {"phrase": "yellow flower", "kind": "weed"}).output)
     assert weeds["total_found"] == 1 and weeds["notes"] == ["match 2: mostly crop"]
-    assert state.instances["s0-i3"].prompt == "flower"
-    assert state.steps[-1].summary == 'Segment "flower": 1 found, 1 dropped as crop'
+    assert state.instances["s0-i3"].prompt == "yellow flower"
+    assert state.steps[-1].summary == 'Segment "yellow flower": 1 found, 1 dropped as crop'
     assert runner.run("segment", {"phrase": "plant", "kind": "all_plants"}).output.startswith("error:")
 
 
@@ -95,6 +96,82 @@ def test_classify_resolves_synonyms_and_rejects_unknown():
     bad = runner.run("classify", {"items": [{"instance_id": "s0-i1", "role": "weed", "species_id": "dragonweed",
                                              "id_confidence": "high"}]})
     assert bad.output.startswith("error:") and state.instances["s0-i1"].id_confidence is None
+
+
+def _verdict(instance_id, role="weed", species=None, confidence="medium", **extra):
+    return {"instance_id": instance_id, "role": role, "species_id": species, "height_in": None, "leaf_count": None,
+            "id_confidence": confidence, **extra}
+
+
+def test_classify_coerces_numbers_and_ignores_crop_names():
+    runner, state = _runner()
+    _mark(runner, "crop", PLANT)
+    _mark(runner, "weed", WEED_A, WEED_B)  # s0-i1 is the crop plant; s0-i2 and s0-i3 are weeds
+    ok = runner.run("classify", {"items": [
+        _verdict("s0-i2", species="", confidence="high", height_in="3", leaf_count="4.0"),
+        _verdict("s0-i1", role="crop", species="soybean", confidence="high"),  # a crop's name is not a weed species
+        _verdict("s0-i3", species="Marestail", height_in=2.5, leaf_count=6)]})
+    assert json.loads(ok.output) == {"ok": ["s0-i2", "s0-i1", "s0-i3"]}
+    weed, crop, other = (state.instances[i] for i in ("s0-i2", "s0-i1", "s0-i3"))
+    assert (weed.height_in, weed.leaf_count, weed.species_id) == (3.0, 4, None)
+    assert (crop.role, crop.species_id) == ("crop", None)
+    assert (other.species_id, other.height_in, other.leaf_count) == ("horseweed", 2.5, 6)
+
+
+def test_classify_rejects_bad_values_before_changing_anything():
+    runner, state = _runner()
+    _mark(runner, "weed", WEED_A, WEED_B)
+    good = _verdict("s0-i1", species="waterhemp", confidence="high", height_in=3)
+    for bad in ({"height_in": "tall"}, {"height_in": -2}, {"height_in": "nan"}, {"height_in": True},
+                {"leaf_count": "many"}, {"leaf_count": [3]}, {"id_confidence": "sure"}, {"role": "tree"}):
+        out = runner.run("classify", {"items": [good, _verdict("s0-i2", **bad)]})
+        assert out.output.startswith("error:"), bad
+        assert all(i.id_confidence is None and i.height_in is None for i in state.instances.values()), bad
+
+
+def test_a_confident_verdict_clears_the_check_flag_but_patches_stay_flagged():
+    runner, state = _runner()
+    _mark(runner, "crop", ROW)
+    _mark(runner, "weed", EDGE, WEED_A, PATCH)  # s0-i2 sits partly in the row canopy, s0-i4 is a patch
+    assert [state.instances[i].check_this for i in ("s0-i2", "s0-i3", "s0-i4")] == [True, False, True]
+    runner.run("classify", {"items": [_verdict("s0-i2", confidence="high"), _verdict("s0-i3", confidence="low"),
+                                      _verdict("s0-i4", confidence="high")]})
+    assert [state.instances[i].check_this for i in ("s0-i2", "s0-i3", "s0-i4")] == [False, True, True]
+
+
+def test_finish_tidies_stage_and_notes():
+    runner, state = _runner()
+    runner.run("measure", {"view_type": "close_up"})
+    assert runner.run("finish", {"crop_stage": " V3 ", "notes": None}).finished
+    assert (state.crop_stage, state.notes) == ("V3", "")
+    assert runner.run("finish", {"crop_stage": "  ", "notes": 7}).finished
+    assert (state.crop_stage, state.notes) == (None, "7")
+
+
+class _ZeroBasedSam(FakeSam):
+    """Numbers its objects from 0, though the first box's object should be 1."""
+
+    def segment_boxes(self, image, boxes):
+        return [SamRecord(str(int(r.object_id) - 1), r.box, r.confidence, r.mask)
+                for r in super().segment_boxes(image, boxes)]
+
+
+def test_mark_logs_object_ids_sam_was_not_asked_for():
+    runner, state = _runner(_ZeroBasedSam())
+    _mark(runner, "weed", WEED_A, WEED_B)
+    odd = [s for s in state.steps if s.tool == "mark" and not s.ok]
+    assert [s.summary for s in odd] == ["SAM returned unexpected object ids ['0']"]
+    runner, state = _runner()  # ids 1..N, as asked: nothing to log
+    _mark(runner, "weed", WEED_A, WEED_B)
+    assert all(s.ok for s in state.steps)
+
+
+def test_segment_lists_up_to_a_hundred_matches():
+    cells = [(n % 10 * 10, n // 10 * 10) for n in range(100)]
+    matches = [mask_record(str(n), rect(x, y, x + 4, y + 4)) for n, (x, y) in enumerate(cells)]
+    runner, _ = _runner(FakeSam(concepts={"dandelion": matches}))
+    out = json.loads(runner.run("segment", {"phrase": "dandelion", "kind": "weed"}).output)
+    assert out["total_found"] == 100 and len(out["found"]) == 100
 
 
 def test_zoom_on_an_instance_or_a_thousandths_box():
