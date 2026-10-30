@@ -16,7 +16,7 @@ class Settings:
     full_max_px: int = 2048
     work_max_px: int = 1024
     max_tool_calls: int = 12
-    stop_timeout_s: float = 90.0
+    stop_timeout_s: float = 240.0  # Muse Spark takes 13-16 s per turn
     max_concurrent_stops: int = 4
     max_photos: int = 10
     max_upload_bytes: int = 25_000_000
