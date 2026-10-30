@@ -19,7 +19,7 @@
 | IMG_3922 (alfalfa, wide) | "alfalfa plant" 0 | 0 | "dandelion" 36, "sky" 1 (0.98) |
 | IMG_3926 (alfalfa, close) | "alfalfa plant" 0 | 0 | "dandelion" 18, "sky" 0 |
 
-A follow-up probe (`scratchpad/sam_probe.py`) tried more phrases:
+A follow-up probe (`scripts/probe_sam_phrases.py`) tried more phrases:
 
 - **IMG_4214:**
   - "corn", "maize", "corn leaf", "leaf", "weed" and "grass blade" all returned 0.
@@ -57,10 +57,40 @@ A follow-up probe (`scratchpad/sam_probe.py`) tried more phrases:
 - Muse Spark verifies each weed by zooming in.
 - Task 11 checks whether Muse Spark's points actually land on weeds.
 
-## Muse Spark (Task 11)
+## Muse Spark (Task 11, `scripts/spike_agent.py`, model `muse-spark-1.3`)
 
-- Tool call round trip: (pending)
-- Image in follow-up user message: (pending)
-- Structured output: (pending)
-- Pointing accuracy: (pending)
-- Typical latency per turn: (pending)
+- **Tool call round trip: works.**
+  - `report_rows` came back with `{"count": 7, "notes": ...}`.
+  - The schema left `notes` optional and there was no 400, so Meta does not force strict mode on tools.
+- **Image in a follow-up user message (chained with `previous_response_id`): works.** It correctly described the corn close-up.
+- **Structured output (strict json_schema): works.** It returned `{"crop": "corn", "weeds_visible": true}`.
+- **Latency: 13–16 s per turn.** The agent loop has to use few turns. At about 12 turns a stop would take 2–3 minutes.
+
+### Pointing accuracy (`spike_out/pointing_sheet.jpg`)
+
+One point per weed, each point sent to SAM separately:
+
+| Photo | Pixel coordinates | 0–1000 coordinates |
+|---|---|---|
+| IMG_4219 (soybean) | 8 points. Most sit on the soybean rows, so SAM returned whole rows: unusable. | 7 points. About half sit on inter-row weeds; the rest hit rows. |
+| IMG_4215 (corn) | 36 points in the inter-row. SAM merged them into one large strip. | 30 points on the inter-row weeds. The pieces are mostly weeds, plus one corn leaf. |
+| IMG_3926 (alfalfa) | 14 points next to dandelions | 12 points next to dandelions |
+
+**0–1000 coordinates are clearly better than pixels.** A single point on crop is the worst case, because SAM returns the whole row.
+
+### Boxes instead of points (`scripts/probe_boxes.py`, `spike_out/boxes_sheet.jpg`)
+
+Muse Spark gave a tight box per weed in 0–1000 coordinates, and all of a photo's boxes went to SAM as one multi-object request (up to 16):
+
+| Photo | Muse Spark | SAM (one request) | Result |
+|---|---|---|---|
+| IMG_4219 | 8 boxes, 14 s ("waterhemp", "pigweed", "common ragweed") | 8 records, 1.3 s | 4 are tight masks on inter-row weeds, 3 sit on soybean foliage at the row edges |
+| IMG_4215 | 16 boxes, 11 s ("horsetail") | 16 records, 1.4 s | Most are on the inter-row weeds, 1 is on a corn leaf |
+| IMG_3926 | 14 boxes, 8 s ("dandelion flower") | 14 records, 3.1 s | Small boxes sit slightly off the flowers, and SAM fills the box |
+
+**Decision: weeds are found with boxes in 0–1000 coordinates, all sent in one SAM request.** It needs 2 turns instead of up to 16 SAM calls, and boxes bound SAM's mask so it can't swallow a whole row. Remaining errors (boxes on crop, small boxes off target) are handled by:
+
+- Subtracting the crop mask.
+- Treating a "weed" that mostly overlaps crop as a crop hit.
+- The agent zooming in to verify.
+
