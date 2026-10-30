@@ -13,6 +13,7 @@ from scout.retry import with_retry
 from scout.vision.sam_parse import SamRecord, parse_sam_output
 
 log = logging.getLogger(__name__)
+MAX_OBJECTS = 16  # SAM 3.1 takes at most 16 objects in one box/point request
 
 
 class SamClient:
@@ -102,3 +103,12 @@ class SamClient:
         )
         text = build_object_prompt(size=image.size, objects=[PromptObject(id=1, prompts=[prompt])])
         return self._records(image, text)
+
+    def segment_boxes(self, image: StopImage, boxes: Sequence[Box]) -> list[SamRecord]:
+        """One multi-object request: object i + 1 is boxes[i]. A record's object_id names its box ("1" is boxes[0]);
+        boxes SAM found nothing for are absent."""
+        if not 1 <= len(boxes) <= MAX_OBJECTS:
+            raise ValueError(f"segment_boxes takes 1 to {MAX_OBJECTS} boxes, got {len(boxes)}")
+        objects = [PromptObject(id=i + 1, prompts=[FramePrompt(frame=0, box=PromptBox(*(int(v) for v in box)))])
+                   for i, box in enumerate(boxes)]
+        return self._records(image, build_object_prompt(size=image.size, objects=objects))
