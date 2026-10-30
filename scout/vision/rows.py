@@ -1,9 +1,12 @@
-"""Fit crop rows as lines through crop-plant centers (RANSAC), and build an in-row band mask."""
+"""In-row zone: lines fitted through separate crop plants (RANSAC), or the row canopies SAM returns."""
 import random
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from scipy import ndimage
+
+_EIGHT = np.ones((3, 3), dtype=bool)
 
 
 @dataclass
@@ -65,3 +68,20 @@ def band_mask(fit: RowFit, size: tuple[int, int]) -> np.ndarray:
     for a, b in fit.lines:
         band |= np.abs(v - (a * u + b)) <= fit.half_width
     return band
+
+
+def canopy_band(crop: np.ndarray, margin: int = 3, max_cover: float = 0.9) -> np.ndarray | None:
+    """In-row zone when crop masks are whole row canopies (a SAM prompt on a crop row returns the row).
+
+    The canopy plus weed-sized holes in it, grown by `margin` px so slightly disagreeing mask edges still meet.
+    Bigger enclosed gaps (a furrow shut in where two rows touch) stay between-row. None when no between-row
+    ground is left to compare against.
+    """
+    if not crop.any():
+        return None
+    holes, count = ndimage.label(ndimage.binary_fill_holes(crop) & ~crop)
+    half_width = 2.0 * float(ndimage.distance_transform_edt(crop)[crop].mean())  # exact for a straight strip
+    small = np.bincount(holes.ravel(), minlength=count + 1) <= half_width ** 2
+    small[0] = False
+    zone = ndimage.binary_dilation(crop | small[holes], structure=_EIGHT, iterations=margin)
+    return zone if zone.mean() <= max_cover else None
