@@ -38,7 +38,7 @@
 - **SAM output:**
   - Format: `<0f>ID<|box;x1=;y1=;x2=;y2=;w=;h=[;c=]|><|mask;x=0;y=0[;c=];data=H,W,<payload>|>`, where `x2`/`y2` are inclusive.
   - The mask raster covers the **box**, not the whole frame.
-  - The payload is base85 and can contain `,` `;` `<` `>`, but never `|`.
+  - The payload is base85 over printable ASCII minus `" \ , ; < > |`, so `;` always separates fields and `|` ends the token. Fields are read by name (order doesn't matter) and whitespace around keys and values is trimmed.
 - **`meta-sam-parser` 0.1.0:**
   - `decode_mask_to_raster(SegmentationMask(encoding, payload, width, height)) -> bytes` (row-major 0/1). The `payload` includes its `!`/`~` marker.
   - The public stream parser is async-only, so we parse the final text ourselves with a regex and decode masks with the library.
@@ -742,7 +742,12 @@ def sam_text(records, frame_size):
 import numpy as np
 
 from scout.vision.sam_parse import parse_sam_output
-from tests.helpers import sam_text
+from tests.helpers import sam_record_text, sam_text
+
+
+def _corrupt(record):
+    """Change the payload's last digit so the strict one_bit decode rejects it."""
+    return record[:-3] + ("A" if record[-3] != "A" else "B") + record[-2:]
 
 
 def test_parses_two_records_with_confidence():
@@ -762,11 +767,37 @@ def test_parses_two_records_with_confidence():
 def test_resizes_mask_that_does_not_match_box():
     text = sam_text([("0", (0, 0, 4, 4), np.ones((2, 2), bool))], (10, 10))
     record = parse_sam_output(text)[0]
-    assert record.mask.shape == (4, 4) and record.mask.all()
+    assert record.mask.shape == (4, 4) and record.mask.all() and record.resized
+
+
+def test_resize_keeps_orientation():
+    pattern = np.array([[1, 0, 0], [0, 0, 1]], bool)
+    record = parse_sam_output(sam_text([("0", (0, 0, 6, 4), pattern)], (10, 10)))[0]
+    assert record.mask.shape == (4, 6) and record.mask[0, 0] and record.mask[3, 5] and not record.mask[0, 5]
 
 
 def test_empty_output_gives_no_records():
     assert parse_sam_output("") == []
+
+
+def test_bad_record_is_skipped_and_logged(caplog):
+    good = sam_record_text("1", (0, 0, 3, 3), np.ones((3, 3), bool), (10, 10))
+    bad = _corrupt(sam_record_text("0", (5, 5, 9, 9), np.eye(4, dtype=bool), (10, 10)))
+    assert [r.object_id for r in parse_sam_output("<0f>" + bad + "," + good)] == ["1"]
+    assert "kept 1 records" in caplog.text
+
+
+def test_truncated_last_record_is_counted(caplog):
+    text = sam_text([("0", (0, 0, 3, 3), np.ones((3, 3), bool)), ("1", (4, 4, 7, 7), np.ones((3, 3), bool))], (10, 10))
+    assert [r.object_id for r in parse_sam_output(text[:-2])] == ["0"]
+    assert "1 record(s) not in" in caplog.text
+
+
+def test_fields_in_any_order_with_spaces():
+    payload = sam_record_text("0", (2, 2, 5, 5), np.ones((3, 3), bool), (10, 10)).split("data=3,3,")[1][:-2]
+    text = f"<0f>0<|box; y1 = 2 ;x1=2;x2=4;y2=4;w=10;h=10|><|mask;data=3,3,{payload}; c = 0.7 ;x=0;y=0|>"
+    record = parse_sam_output(text)[0]
+    assert record.box == (2, 2, 5, 5) and record.confidence == 0.7 and record.mask.all()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -781,17 +812,21 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.vision.sam_pars
 """Parse SAM 3.1 output text into records with box-local boolean masks.
 
 Record grammar: ID<|box;x1=;y1=;x2=;y2=;w=;h=[;c=]|><|mask;x=0;y=0[;c=];data=H,W,<payload>|>
-x2/y2 are inclusive. The mask raster covers the box. The base85 payload never contains '|'.
+x2/y2 are inclusive. The mask raster covers the box. Fields are read by name, and the base85 payload never
+contains , ; < > or |, so ';' always separates fields.
 """
+import logging
 import re
 from dataclasses import dataclass
 
 import numpy as np
-from meta_sam_parser import SegmentationMask, decode_mask_to_raster
+from meta_sam_parser import InvalidSegmentationMaskError, SegmentationMask, decode_mask_to_raster
 from PIL import Image
 
 from scout.models import Box
 from scout.vision.masks import paste
+
+log = logging.getLogger(__name__)
 
 _RECORD = re.compile(r"([A-Za-z0-9_-]+)<\|box;([^|]*)\|><\|mask;([^|]*)\|>")
 _DATA = re.compile(r"(\d+),(\d+),([!~][^|]+)")
@@ -803,6 +838,7 @@ class SamRecord:
     box: Box
     confidence: float | None
     mask: np.ndarray  # bool, shaped (box height, box width)
+    resized: bool = False  # True when SAM's raster size differed from the box and was stretched to fit
 
     def full_mask(self, size: tuple[int, int]) -> np.ndarray:
         return paste(self.mask, self.box, size)
@@ -811,38 +847,50 @@ class SamRecord:
 def _fields(body: str) -> dict[str, str]:
     out = {}
     for part in body.split(";"):
-        if "=" in part:
-            key, value = part.split("=", 1)
-            out[key] = value
+        key, sep, value = part.partition("=")
+        if sep:
+            out[key.strip()] = value.strip()
     return out
 
 
+def _record(object_id: str, box_body: str, mask_body: str) -> SamRecord:
+    box, mask = _fields(box_body), _fields(mask_body)
+    parsed = _DATA.fullmatch(mask.get("data", ""))
+    if parsed is None:
+        raise ValueError("mask has no H,W,payload data")
+    height, width, payload = int(parsed[1]), int(parsed[2]), parsed[3]
+    encoding = "lossless" if payload.startswith("~") else "one_bit"
+    raster = decode_mask_to_raster(SegmentationMask(encoding=encoding, payload=payload, width=width, height=height))
+    local = np.frombuffer(raster, dtype=np.uint8).reshape(height, width).astype(bool)
+    left, top = int(box["x1"]), int(box["y1"])
+    right, bottom = int(box["x2"]) + 1, int(box["y2"]) + 1
+    resized = local.shape != (bottom - top, right - left)
+    if resized:
+        local = np.array(Image.fromarray(local).resize((right - left, bottom - top), Image.NEAREST)).astype(bool)
+    confidence = box.get("c") or mask.get("c")
+    return SamRecord(object_id, (left, top, right, bottom), float(confidence) if confidence else None, local, resized)
+
+
 def parse_sam_output(text: str) -> list[SamRecord]:
-    records = []
+    """Records that fail to parse or decode are skipped and logged, so one bad record cannot sink the call."""
+    records, errors = [], []
     for match in _RECORD.finditer(text):
-        object_id, box_body, mask_body = match.groups()
-        box = _fields(box_body)
-        head, _, data = mask_body.partition("data=")  # data is last, and its payload may contain ';'
-        parsed = _DATA.fullmatch(data)
-        if parsed is None:
-            continue
-        height, width, payload = int(parsed[1]), int(parsed[2]), parsed[3]
-        encoding = "lossless" if payload.startswith("~") else "one_bit"
-        raster = decode_mask_to_raster(SegmentationMask(encoding=encoding, payload=payload, width=width, height=height))
-        local = np.frombuffer(raster, dtype=np.uint8).reshape(height, width).astype(bool)
-        left, top = int(box["x1"]), int(box["y1"])
-        right, bottom = int(box["x2"]) + 1, int(box["y2"]) + 1
-        if local.shape != (bottom - top, right - left):
-            local = np.array(Image.fromarray(local).resize((right - left, bottom - top), Image.NEAREST)).astype(bool)
-        confidence = box.get("c") or _fields(head).get("c")
-        records.append(SamRecord(object_id, (left, top, right, bottom), float(confidence) if confidence else None, local))
+        try:
+            records.append(_record(*match.groups()))
+        except (InvalidSegmentationMaskError, KeyError, ValueError) as error:
+            errors.append(f"record {match[1]}: {type(error).__name__}: {error}")
+    unmatched = text.count("<|box") - len(records) - len(errors)
+    if unmatched > 0:
+        errors.append(f"{unmatched} record(s) not in ID<|box;...|><|mask;...|> form")
+    if errors:
+        log.warning("SAM output: kept %d records, skipped: %s", len(records), errors[:3])
     return records
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_sam_parse.py -v`
-Expected: 3 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1102,6 +1150,7 @@ class SamClient:
         self._model = model
         self._sleep = sleep
         self._cache: dict[tuple[str, str], str] = {}
+        self._parsed: dict[tuple[str, str], list[SamRecord]] = {}
 
     @classmethod
     def from_settings(cls, settings) -> "SamClient":
@@ -1131,8 +1180,15 @@ class SamClient:
             self._cache[key] = with_retry(lambda: self._send(payload), sleep=self._sleep)
         return self._cache[key]
 
+    def _records(self, image: StopImage, text: str) -> list[SamRecord]:
+        """Parsed records are cached too, since decoding masks costs seconds of CPU."""
+        key = (image.hash, text)
+        if key not in self._parsed:
+            self._parsed[key] = parse_sam_output(self.fetch_raw(image, text))
+        return self._parsed[key]
+
     def segment_concept(self, image: StopImage, phrase: str) -> list[SamRecord]:
-        return parse_sam_output(self.fetch_raw(image, phrase.strip()))
+        return self._records(image, phrase.strip())
 
     def segment_at(self, image: StopImage, box: Box | None = None,
                    points: Sequence[tuple[int, int, bool]] = ()) -> list[SamRecord]:
@@ -1142,7 +1198,7 @@ class SamClient:
             points=[PromptPoint(int(x), int(y), label="positive" if positive else "negative") for x, y, positive in points],
         )
         text = build_object_prompt(size=image.size, objects=[PromptObject(id=1, prompts=[prompt])])
-        return parse_sam_output(self.fetch_raw(image, text))
+        return self._records(image, text)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1302,7 +1358,7 @@ def main() -> None:
             records = parse_sam_output(raw)
             decoded = time.time()
             unions[prompt] = mk.union([r.full_mask(image.size) for r in records], image.size)
-            mismatched = sum(1 for r in records if r.mask.shape != (r.box[3] - r.box[1], r.box[2] - r.box[0]))
+            mismatched = sum(r.resized for r in records)
             confs = [round(r.confidence, 2) for r in records if r.confidence is not None]
             print(f"{stem} | {prompt!r}: {len(records)} found, api {fetched - started:.1f}s, "
                   f"decode {decoded - fetched:.1f}s, conf {confs[:8]}, mask/box size mismatches {mismatched}")
