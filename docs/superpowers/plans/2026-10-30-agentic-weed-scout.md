@@ -931,7 +931,9 @@ def make_image(width=100, height=100, index=0, color=(90, 140, 60)):
 ```python
 import io
 
+import pytest
 from PIL import Image
+from PIL.TiffImagePlugin import IFDRational
 
 from scout.app.ingest import gps_from_ifd, load_image
 from tests.helpers import png_bytes
@@ -960,6 +962,56 @@ def test_gps_from_ifd():
 
 def test_work_data_url_is_jpeg():
     assert load_image(0, png_bytes(50, 50)).work_data_url.startswith("data:image/jpeg;base64,")
+
+
+def test_load_image_reads_gps_from_exif():
+    exif = Image.Exif()
+    exif.get_ifd(0x8825).update({1: "S", 2: (IFDRational(41, 1), IFDRational(30, 1), IFDRational(0, 1)),
+                                 3: "W", 4: (IFDRational(93, 1), IFDRational(36, 1), IFDRational(0, 1))})
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 20)).save(buf, format="JPEG", exif=exif)
+    assert load_image(0, buf.getvalue()).gps == (-41.5, -93.6)
+
+
+def test_gps_from_ifd_rejects_unknown_and_impossible_values():
+    unknown = IFDRational(0, 0)  # Pillow reads 0/0 as NaN
+    assert gps_from_ifd({1: "N", 2: (unknown,) * 3, 3: "W", 4: (unknown,) * 3}) is None
+    assert gps_from_ifd({1: "N", 2: (0.0, 0.0, 0.0), 3: "E", 4: (0.0, 0.0, 0.0)}) is None
+    assert gps_from_ifd({1: "N", 2: (95.0, 0.0, 0.0), 3: "W", 4: (93.0, 0.0, 0.0)}) is None
+
+
+def test_heic_is_rotated_exactly_once():
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 20)).save(buf, format="HEIF", exif=exif.tobytes())
+    assert load_image(0, buf.getvalue()).work.size == (20, 40)
+
+
+def test_small_rgba_image_is_not_upscaled_and_becomes_rgb():
+    buf = io.BytesIO()
+    Image.new("RGBA", (50, 30)).save(buf, format="PNG")
+    image = load_image(0, buf.getvalue())
+    assert image.full.size == image.work.size == (50, 30) and image.work.mode == "RGB"
+
+
+@pytest.mark.parametrize("data", [b"", b"not an image", png_bytes(500, 500)[:100]])
+def test_unreadable_bytes_raise(data):
+    with pytest.raises((OSError, ValueError)):
+        load_image(0, data)
+
+
+def test_rejects_too_many_pixels(monkeypatch):
+    monkeypatch.setattr("scout.app.ingest.MAX_PIXELS", 99)
+    with pytest.raises(ValueError):
+        load_image(0, png_bytes(10, 10))
+
+
+def test_rejects_formats_outside_jpeg_png_heic():
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(buf, format="TIFF")
+    with pytest.raises(OSError):
+        load_image(0, buf.getvalue())
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -975,6 +1027,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.app.ingest'`
 import base64
 import hashlib
 import io
+import math
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -984,6 +1037,8 @@ from PIL import Image, ImageOps
 pillow_heif.register_heif_opener()
 
 GPS_IFD = 0x8825
+FORMATS = ("JPEG", "PNG", "HEIF")  # JPEG also opens iPhone/DJI MPO files
+MAX_PIXELS = 64_000_000  # 48-64 MP phone photos; refuses decompression bombs long before Pillow's 179 MP error
 
 
 def to_data_url(image: Image.Image, quality: int = 90) -> str:
@@ -1029,18 +1084,27 @@ def gps_from_ifd(gps: dict) -> tuple[float, float] | None:
         lat = -lat
     if gps.get(3) == "W":
         lon = -lon
+    if not (math.isfinite(lat) and math.isfinite(lon)) or abs(lat) > 90 or abs(lon) > 180 or lat == lon == 0:
+        return None  # 0/0 rationals read as NaN; (0, 0) is a phone with no fix
     return (round(lat, 6), round(lon, 6))
 
 
 def load_image(index: int, data: bytes, full_max_px: int = 2048, work_max_px: int = 1024) -> StopImage:
-    image = Image.open(io.BytesIO(data))
+    """Raises (OSError, ValueError, or Pillow's DecompressionBombError) for bytes that aren't a usable photo."""
+    image = Image.open(io.BytesIO(data), formats=FORMATS)
+    if image.width * image.height > MAX_PIXELS:
+        raise ValueError(f"image is {image.width}x{image.height}; too many pixels")
     gps = gps_from_ifd(dict(image.getexif().get_ifd(GPS_IFD)))
-    image = ImageOps.exif_transpose(image).convert("RGB")
+    image.draft("RGB", (full_max_px, full_max_px))  # JPEG: decode big photos at 1/2 or 1/4 scale; no-op otherwise
+    ImageOps.exif_transpose(image, in_place=True)  # pillow-heif already rotated HEIC and reset its Orientation tag
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    full = _shrink(image, full_max_px)
     return StopImage(
         index=index,
         hash=hashlib.sha256(data).hexdigest()[:16],
-        full=_shrink(image, full_max_px),
-        work=_shrink(image, work_max_px),
+        full=full,
+        work=_shrink(full, work_max_px),
         gps=gps,
     )
 ```
@@ -1048,7 +1112,7 @@ def load_image(index: int, data: bytes, full_max_px: int = 2048, work_max_px: in
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_ingest.py -v`
-Expected: 4 passed
+Expected: 13 passed
 
 - [ ] **Step 5: Commit**
 
@@ -4662,7 +4726,8 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
             if len(data) > settings.max_upload_bytes:
                 raise HTTPException(400, f"{upload.filename} is over {settings.max_upload_bytes // 1_000_000} MB.")
             try:
-                images.append(load_image(index, data, settings.full_max_px, settings.work_max_px))
+                # In a thread: decoding takes 0.5-1.5 s per photo and would otherwise stall every SSE stream.
+                images.append(await asyncio.to_thread(load_image, index, data, settings.full_max_px, settings.work_max_px))
             except Exception:
                 raise HTTPException(400, f"{upload.filename} isn't a photo we can read.") from None
         walk_id = walk_id_for(crop, images)
