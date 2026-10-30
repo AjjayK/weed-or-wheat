@@ -52,3 +52,21 @@ def test_segment_at_sends_object_prompt():
     assert text == "<0f>1<|point;x=10;y=20;w=100;h=80|>-<|point;x=30;y=40;w=100;h=80|>"
     sam.segment_at(image, box=(5, 6, 50, 60))
     assert sent[1]["input"][0]["content"][0]["text"] == "<0f>1<|box;x1=5;y1=6;x2=49;y2=59;w=100;h=80|>"
+
+
+def test_cache_is_per_image():
+    calls = []
+    sam = SamClient(lambda p: calls.append(p) or "", sleep=lambda s: None)
+    sam.segment_concept(make_image(32, 32, color=(10, 200, 10)), "plant")
+    sam.segment_concept(make_image(32, 32, color=(200, 10, 10)), "plant")
+    assert len(calls) == 2
+
+
+def test_cache_is_bounded():
+    image, calls = make_image(32, 32), []
+    sam = SamClient(lambda p: calls.append(p) or "", sleep=lambda s: None, max_entries=2)
+    for phrase in ("a", "b", "c", "a"):
+        sam.segment_concept(image, phrase)
+    assert len(calls) == 4  # "a" was evicted by "c"
+    sam.segment_concept(image, "a")
+    assert len(calls) == 4
