@@ -1,12 +1,22 @@
+import httpx
+import openai
 import pytest
 
 from scout.retry import BadRequest, with_retry
+
+_REQUEST = httpx.Request("POST", "https://api.meta.ai/v1/responses")
 
 
 class StatusError(Exception):
     def __init__(self, status_code):
         super().__init__(f"status {status_code}")
         self.status_code = status_code
+
+
+def _raiser(error):
+    def fn():
+        raise error
+    return fn
 
 
 def test_retries_transient_then_succeeds():
@@ -22,12 +32,13 @@ def test_retries_transient_then_succeeds():
     assert sleeps == [1, 2]
 
 
-def test_bad_request_is_not_retried():
+@pytest.mark.parametrize("status", [400, 413, 422])
+def test_rejected_request_is_not_retried(status):
     calls = []
 
     def fn():
         calls.append(1)
-        raise StatusError(400)
+        raise StatusError(status)
 
     with pytest.raises(BadRequest):
         with_retry(fn, sleep=lambda s: None)
@@ -51,3 +62,23 @@ def test_gives_up_after_retries():
     with pytest.raises(StatusError):
         with_retry(fn, retries=2, sleep=sleeps.append)
     assert sleeps == [1, 2]
+
+
+def test_sdk_connection_error_is_retried():
+    sleeps = []
+    with pytest.raises(openai.APIConnectionError):
+        with_retry(_raiser(openai.APIConnectionError(request=_REQUEST)), retries=1, sleep=sleeps.append)
+    assert sleeps == [1]
+
+
+def test_sdk_timeout_is_not_retried():
+    sleeps = []
+    with pytest.raises(openai.APITimeoutError):
+        with_retry(_raiser(openai.APITimeoutError(request=_REQUEST)), sleep=sleeps.append)
+    assert sleeps == []
+
+
+def test_sdk_bad_request_becomes_bad_request():
+    error = openai.BadRequestError("rejected", response=httpx.Response(400, request=_REQUEST), body=None)
+    with pytest.raises(BadRequest):
+        with_retry(_raiser(error), sleep=lambda s: None)
