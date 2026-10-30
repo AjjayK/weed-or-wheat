@@ -30,6 +30,25 @@ def test_pieces_splits_blobs_and_drops_small():
     assert sorted(int(p.sum()) for p in found) == [100, 100]
 
 
+def test_pieces_drops_slivers_along_excluded_edges():
+    crop = np.zeros((60, 60), bool)
+    crop[10:40, 10:40] = True
+    plant = np.zeros((60, 60), bool)
+    plant[8:42, 8:42] = True
+    assert mk.pieces(plant, min_area=5, exclude=crop) == []
+
+
+def test_pieces_keeps_thin_blades():
+    blade = np.zeros((60, 60), bool)
+    for y in range(5, 55):
+        blade[y, y - 2:y + 1] = True
+    assert [int(p.sum()) for p in mk.pieces(blade, min_area=20)] == [int(blade.sum())]
+
+
+def test_pad_box_pads_thin_boxes_on_both_axes():
+    assert mk.pad_box((50, 10, 53, 110), 0.15, (200, 200)) == (35, 0, 68, 125)
+
+
 def test_pad_box_clamps():
     assert mk.pad_box((0, 0, 10, 10), 0.5, (12, 12)) == (0, 0, 12, 12)
     assert mk.pad_box((10, 10, 20, 20), 0.1, (100, 100)) == (9, 9, 21, 21)
