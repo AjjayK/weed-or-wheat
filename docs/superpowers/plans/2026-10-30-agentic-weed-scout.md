@@ -604,6 +604,25 @@ def test_pieces_splits_blobs_and_drops_small():
     assert sorted(int(p.sum()) for p in found) == [100, 100]
 
 
+def test_pieces_drops_slivers_along_excluded_edges():
+    crop = np.zeros((60, 60), bool)
+    crop[10:40, 10:40] = True
+    plant = np.zeros((60, 60), bool)
+    plant[8:42, 8:42] = True
+    assert mk.pieces(plant, min_area=5, exclude=crop) == []
+
+
+def test_pieces_keeps_thin_blades():
+    blade = np.zeros((60, 60), bool)
+    for y in range(5, 55):
+        blade[y, y - 2:y + 1] = True
+    assert [int(p.sum()) for p in mk.pieces(blade, min_area=20)] == [int(blade.sum())]
+
+
+def test_pad_box_pads_thin_boxes_on_both_axes():
+    assert mk.pad_box((50, 10, 53, 110), 0.15, (200, 200)) == (35, 0, 68, 125)
+
+
 def test_pad_box_clamps():
     assert mk.pad_box((0, 0, 10, 10), 0.5, (12, 12)) == (0, 0, 12, 12)
     assert mk.pad_box((10, 10, 20, 20), 0.1, (100, 100)) == (9, 9, 21, 21)
@@ -624,12 +643,16 @@ from scipy import ndimage
 
 from scout.models import Box
 
+_EIGHT = np.ones((3, 3), dtype=bool)
+
 
 def paste(local: np.ndarray, box: Box, size: tuple[int, int]) -> np.ndarray:
     """Place a box-local mask onto a full canvas, clipping anything outside it."""
     width, height = size
     canvas = np.zeros((height, width), dtype=bool)
     left, top, right, bottom = box
+    if local.shape != (bottom - top, right - left):
+        raise ValueError(f"mask shape {local.shape} does not match box {box}")
     l, t = max(left, 0), max(top, 0)
     r, b = min(right, width), min(bottom, height)
     if r <= l or b <= t:
@@ -646,14 +669,17 @@ def union(masks: list[np.ndarray], size: tuple[int, int]) -> np.ndarray:
     return out
 
 
-def pieces(mask: np.ndarray, min_area: float) -> list[np.ndarray]:
-    """Split a mask into connected pieces, after an opening that removes slivers along crop edges."""
-    cleaned = ndimage.binary_opening(mask, structure=np.ones((3, 3), dtype=bool))
-    labels, count = ndimage.label(cleaned)
-    if count == 0:
-        return []
-    areas = ndimage.sum(cleaned, labels, index=range(1, count + 1))
-    return [labels == index + 1 for index, area in enumerate(areas) if area >= min_area]
+def pieces(mask: np.ndarray, min_area: float, exclude: np.ndarray | None = None, margin: int = 2) -> list[np.ndarray]:
+    """Split a mask into 8-connected pieces of at least min_area pixels.
+
+    Pixels within `margin` px of `exclude` are dropped first. That removes the slivers left where the plant and
+    crop masks disagree slightly, without the erosion that would also erase thin grass blades elsewhere.
+    """
+    if exclude is not None:
+        mask = mask & ~ndimage.binary_dilation(exclude, structure=_EIGHT, iterations=margin)
+    labels, count = ndimage.label(mask, structure=_EIGHT)
+    areas = np.bincount(labels.ravel(), minlength=count + 1)
+    return [labels == index for index in range(1, count + 1) if areas[index] >= min_area]
 
 
 def bbox(mask: np.ndarray) -> Box:
@@ -665,15 +691,15 @@ def bbox(mask: np.ndarray) -> Box:
 
 def pad_box(box: Box, frac: float, size: tuple[int, int]) -> Box:
     left, top, right, bottom = box
-    pad_x, pad_y = int((right - left) * frac), int((bottom - top) * frac)
+    pad = int(max(right - left, bottom - top) * frac)  # same pad on both axes, so a thin blade's box still widens
     width, height = size
-    return (max(0, left - pad_x), max(0, top - pad_y), min(width, right + pad_x), min(height, bottom + pad_y))
+    return (max(0, left - pad), max(0, top - pad), min(width, right + pad), min(height, bottom + pad))
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_masks.py -v`
-Expected: 5 passed
+Expected: 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1282,7 +1308,7 @@ def main() -> None:
                   f"decode {decoded - fetched:.1f}s, conf {confs[:8]}, mask/box size mismatches {mismatched}")
             render_overlay(image.work, unions[prompt], unions[prompt] & False).save(OUT / f"{stem}__{slug(prompt)}.png")
         crop = unions[args.crop_prompt]
-        candidates = mk.pieces(unions["plant"] & ~crop, 0.0005 * image.size[0] * image.size[1])
+        candidates = mk.pieces(unions["plant"], 0.0005 * image.size[0] * image.size[1], exclude=crop)
         weed = mk.union(candidates, image.size)
         print(f"{stem} | plant minus crop: {len(candidates)} weed candidates")
         render_overlay(image.work, crop, weed).save(OUT / f"{stem}__candidates.png")
@@ -1304,7 +1330,7 @@ Expected: one line per prompt with counts and timings, and PNGs in `spike_out/`.
 
 - [ ] **Step 5: Decide go/no-go and write it down**
 
-Open the `*__candidates.png` files. **Go** if the red pieces mostly sit on weeds rather than on crop, on at least 4 of the 6 photos. **No-go:** try `--extra "weed" "seedling" "green plant"` on the failures.
+Open the `*__candidates.png` files. **Go** if, on at least 4 of the 6 photos, the red pieces mostly sit on weeds rather than on crop, and most visible weeds (grasses included) carry some red. **No-go:** try `--extra "weed" "seedling" "green plant"` on the failures.
 
 If the "plant" concept is still poor, adopt the fallback (spec §8.2.3). The agent marks points on weeds in the full photo and calls `segment_at`. The tools in Task 16 already support this; strengthen `prompts.py` step 3 wording in Task 17.
 
@@ -2233,9 +2259,10 @@ class StopState:
         for iid in [i.id for i in self.instances.values() if i.source == "candidate" and i.role == "unknown"]:
             del self.instances[iid]
             del self.masks[iid]
-        taken = self.union_of(lambda i: i.role in ("crop", "weed"))
+        # Candidates the agent already ignored count as taken, so a refresh doesn't bring them back as unknown.
+        taken = self.union_of(lambda i: i.role in ("crop", "weed") or (i.source == "candidate" and i.role == "ignore"))
         min_area = CANDIDATE_MIN_AREA_FRAC * self.size[0] * self.size[1]
-        return [self.add_mask(piece, "candidate", "plant minus crop") for piece in mk.pieces(pool & ~taken, min_area)]
+        return [self.add_mask(piece, "candidate", "plant minus crop") for piece in mk.pieces(pool, min_area, exclude=taken)]
 
     def row_band(self) -> np.ndarray | None:
         crops = [i for i in self.instances.values() if i.role == "crop"]
