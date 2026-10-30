@@ -1,0 +1,70 @@
+"""Thin wrapper over the Responses API for Muse Spark: one call = one LlmTurn."""
+import json
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Sequence
+
+from scout.retry import with_retry
+
+
+@dataclass
+class ToolCall:
+    call_id: str
+    name: str
+    arguments: dict
+
+
+@dataclass
+class LlmTurn:
+    response_id: str
+    calls: list[ToolCall]
+    text: str
+
+
+def user_message(text: str, image_urls: Sequence[str] = (), file: tuple[str, str] | None = None) -> dict:
+    """A user-role message. Images and files are only processed in user-role messages."""
+    content: list[dict] = [{"type": "input_text", "text": text}]
+    content += [{"type": "input_image", "image_url": url} for url in image_urls]
+    if file is not None:
+        content.append({"type": "input_file", "filename": file[0], "file_data": file[1]})
+    return {"type": "message", "role": "user", "content": content}
+
+
+class Llm:
+    def __init__(self, create: Callable[..., Any], model: str, sleep: Callable[[float], None] = time.sleep):
+        self._create = create
+        self.model = model
+        self._sleep = sleep
+
+    @classmethod
+    def from_settings(cls, settings) -> "Llm":
+        import httpx
+        from openai import OpenAI
+
+        # max_retries=0 leaves with_retry as the only retry layer; connect=5 fails fast on an unreachable host.
+        client = OpenAI(base_url=settings.base_url, api_key=settings.api_key,
+                        timeout=httpx.Timeout(180.0, connect=5.0), max_retries=0)
+        return cls(client.responses.create, settings.agent_model)
+
+    def turn(self, input, instructions: str | None = None, tools: list[dict] | None = None,
+             previous_response_id: str | None = None, text_format: dict | None = None) -> LlmTurn:
+        kwargs: dict[str, Any] = {"model": self.model, "input": input}
+        if instructions:
+            kwargs["instructions"] = instructions
+        if tools:
+            kwargs["tools"] = tools
+        if previous_response_id:
+            kwargs["previous_response_id"] = previous_response_id
+        if text_format:
+            kwargs["text"] = {"format": text_format}
+        response = with_retry(lambda: self._create(**kwargs), sleep=self._sleep)
+        calls = []
+        for item in response.output:
+            if getattr(item, "type", None) != "function_call":
+                continue
+            try:
+                arguments = json.loads(item.arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {"__invalid__": item.arguments}
+            calls.append(ToolCall(item.call_id, item.name, arguments))
+        return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "")
