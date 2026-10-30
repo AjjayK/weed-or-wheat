@@ -38,8 +38,11 @@ class SamClient:
 
         def send(payload: dict) -> str:
             response = client.responses.create(**payload)
-            if not response.output_text:
-                log.warning("SAM reply had no output_text (status=%s, items=%s)", response.status,
+            parts = [part for item in response.output if getattr(item, "type", None) == "message"
+                     for part in getattr(item, "content", None) or []]
+            if not any(getattr(part, "type", None) == "output_text" for part in parts):
+                # An empty output_text part is SAM's normal "no match"; a missing one means an unexpected reply shape.
+                log.warning("SAM reply had no output_text part (status=%s, items=%s)", response.status,
                             [getattr(item, "type", "?") for item in response.output])
             return response.output_text
 
