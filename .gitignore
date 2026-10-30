@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 .venv/
 env/
+.pytest_cache/
+store/
+spike_out/
+run_out/
+scout/labels/pdfs/
+evaluation/results.csv
