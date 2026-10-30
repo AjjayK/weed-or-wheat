@@ -106,3 +106,19 @@ def small_weedbook():
         "unidentified_grass": WeedInfo(id="unidentified_grass", common_name="unidentified grass",
                                        scientific_name="", type="grass"),
     })
+from scout.agent.llm import LlmTurn
+
+
+class FakeLlm:
+    """Plays back turns in order; an exception in the list is raised in its place, like a failed API call."""
+
+    def __init__(self, turns):
+        self.turns = list(turns)
+        self.requests = []
+
+    def turn(self, input, **kwargs):
+        self.requests.append({"input": input, **kwargs})
+        turn = self.turns.pop(0) if self.turns else LlmTurn(f"r-end{len(self.requests)}", [], "")
+        if isinstance(turn, Exception):
+            raise turn
+        return turn
