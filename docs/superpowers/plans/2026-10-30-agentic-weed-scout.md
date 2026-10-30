@@ -1888,7 +1888,9 @@ git commit -m "chore: Muse Spark tool-calling test and notes"
 
 `tests/test_rows.py`:
 ```python
-from scout.vision.rows import band_mask, fit_rows
+import numpy as np
+
+from scout.vision.rows import band_mask, canopy_band, fit_rows
 
 
 def _two_rows(jitter=False):
@@ -1911,6 +1913,32 @@ def test_too_few_plants_gives_no_rows():
 def test_band_mask_covers_rows_only():
     band = band_mask(fit_rows(_two_rows(), [20] * 10), (400, 200))
     assert band[50, 100] and band[50, 300] and not band[50, 200]
+
+
+def _strip(x0, x1, shape=(100, 100)):
+    mask = np.zeros(shape, bool)
+    mask[:, x0:x1] = True
+    return mask
+
+
+def test_canopy_band_is_canopy_plus_margin():
+    band = canopy_band(_strip(10, 30) | _strip(60, 80))
+    assert band[50, 10] and band[50, 8] and band[50, 32]
+    assert not band[50, 35] and not band[50, 45]
+
+
+def test_canopy_band_fills_weed_holes_not_shut_in_furrows():
+    crop = _strip(10, 40)
+    crop[50:55, 20:25] = False
+    shut = _strip(60, 70) | _strip(90, 100)
+    shut[0:5, 60:100] = shut[95:100, 60:100] = True
+    band = canopy_band(crop | shut)
+    assert band[52, 22] and not band[50, 80]
+
+
+def test_canopy_band_none_without_crop_or_between_row_ground():
+    assert canopy_band(np.zeros((50, 50), bool)) is None
+    assert canopy_band(np.ones((50, 50), bool)) is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1922,12 +1950,15 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.vision.rows'`
 
 `scout/vision/rows.py`:
 ```python
-"""Fit crop rows as lines through crop-plant centers (RANSAC), and build an in-row band mask."""
+"""In-row zone: lines fitted through separate crop plants (RANSAC), or the row canopies SAM returns."""
 import random
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from scipy import ndimage
+
+_EIGHT = np.ones((3, 3), dtype=bool)
 
 
 @dataclass
@@ -1989,12 +2020,29 @@ def band_mask(fit: RowFit, size: tuple[int, int]) -> np.ndarray:
     for a, b in fit.lines:
         band |= np.abs(v - (a * u + b)) <= fit.half_width
     return band
+
+
+def canopy_band(crop: np.ndarray, margin: int = 3, max_cover: float = 0.9) -> np.ndarray | None:
+    """In-row zone when crop masks are whole row canopies (a SAM prompt on a crop row returns the row).
+
+    The canopy plus weed-sized holes in it, grown by `margin` px so slightly disagreeing mask edges still meet.
+    Bigger enclosed gaps (a furrow shut in where two rows touch) stay between-row. None when no between-row
+    ground is left to compare against.
+    """
+    if not crop.any():
+        return None
+    holes, count = ndimage.label(ndimage.binary_fill_holes(crop) & ~crop)
+    half_width = 2.0 * float(ndimage.distance_transform_edt(crop)[crop].mean())  # exact for a straight strip
+    small = np.bincount(holes.ravel(), minlength=count + 1) <= half_width ** 2
+    small[0] = False
+    zone = ndimage.binary_dilation(crop | small[holes], structure=_EIGHT, iterations=margin)
+    return zone if zone.mean() <= max_cover else None
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_rows.py -v`
-Expected: 3 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Commit**
 
