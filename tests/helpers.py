@@ -15,3 +15,20 @@ def sam_record_text(object_id, box, mask, frame_size, confidence=None):
 def sam_text(records, frame_size):
     """records: list of (object_id, box, mask) or (object_id, box, mask, confidence)."""
     return "<0f>" + ",".join(sam_record_text(r[0], r[1], r[2], frame_size, *r[3:]) for r in records)
+
+
+import io
+
+from PIL import Image
+
+from scout.app.ingest import load_image
+
+
+def png_bytes(width=100, height=100, color=(90, 140, 60)):
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def make_image(width=100, height=100, index=0, color=(90, 140, 60)):
+    return load_image(index, png_bytes(width, height, color))
