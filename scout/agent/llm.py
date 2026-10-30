@@ -7,6 +7,10 @@ from typing import Any, Callable, Sequence
 from scout.retry import with_retry
 
 
+class LlmError(RuntimeError):
+    """Muse Spark answered, but the response did not complete (failed, incomplete, or cancelled)."""
+
+
 @dataclass
 class ToolCall:
     call_id: str
@@ -58,6 +62,10 @@ class Llm:
         if text_format:
             kwargs["text"] = {"format": text_format}
         response = with_retry(lambda: self._create(**kwargs), sleep=self._sleep)
+        status = getattr(response, "status", None)
+        if status in ("failed", "incomplete", "cancelled"):
+            detail = getattr(response, "incomplete_details", None) or getattr(response, "error", None)
+            raise LlmError(f"Muse Spark response {response.id} was {status}: {detail}")
         calls = []
         for item in response.output:
             if getattr(item, "type", None) != "function_call":
@@ -65,6 +73,8 @@ class Llm:
             try:
                 arguments = json.loads(item.arguments or "{}")
             except json.JSONDecodeError:
+                arguments = None
+            if not isinstance(arguments, dict):  # tools are called with **arguments, so only an object is usable
                 arguments = {"__invalid__": item.arguments}
             calls.append(ToolCall(item.call_id, item.name, arguments))
         return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "")
