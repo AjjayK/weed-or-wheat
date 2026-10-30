@@ -4745,7 +4745,9 @@ git commit -m "feat: add cached sample walks"
 **Files:**
 - Create: `Dockerfile`, `.dockerignore`, `README.md`
 
-- [ ] **Step 1: Write the Dockerfile**
+- [ ] **Step 1: Pin dependencies, then write the Dockerfile**
+
+Hugging Face rebuilds the image from `requirements.txt` on every push, so a new upstream release in deadline week could break the live site. Before deploying, change every line of `requirements.txt` from `>=` to `==` with the version the tests last passed against (read them from `.venv/Scripts/python.exe -m pip freeze`). Pin only the 17 top-level names, not the whole freeze, because a Windows freeze can list packages that don't exist for the Linux image. Rerun `python -m pytest -q`, then commit `chore: pin dependency versions for deploy`.
 
 `Dockerfile`:
 ```dockerfile
