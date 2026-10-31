@@ -94,3 +94,35 @@ Muse Spark gave a tight box per weed in 0–1000 coordinates, and all of a photo
 - Treating a "weed" that mostly overlaps crop as a crop hit.
 - The agent zooming in to verify.
 
+
+## Stop agent on real photos (Task 18, `scripts/run_stop.py`)
+
+**First run, 10 photos, three crops in parallel:**
+- 7 stops finished `ok`. Each used 3–5 turns and took 47–111 s.
+- 3 stops failed with `400 referenced response not found or expired`. Meta sometimes loses the previous response a couple of seconds after returning it.
+- Weed boxes drawn on soybean foliage near the camera passed as large "patches" (IMG_4219, IMG_4220).
+
+**Fixes:**
+- **Lost responses:** when this error happens, the turn is resent with the full conversation and no `previous_response_id`, and the rest of the stop stays stateless. A live smoke test confirmed Meta accepts replayed `function_call` items.
+- **Crop-sized patches:** a patch-sized weed mask that lies at least 50% on any crop (row canopies included) is now vetoed as "mostly crop".
+- **Prompt:** two new hints. Crop leaves close to the camera are crop, and crop boxes should hug the rows.
+
+**Rerun of the 5 affected photos:** all `ok`. IMG_4220 hit the lost-response error once and recovered with the full resend.
+
+| Photo | Crop | Weed cover | Weeds | Species |
+|---|---|---|---|---|
+| IMG_4214 | corn | 11.8% | 12 | unidentified grass |
+| IMG_4215 | corn | 5.9% | 12 | field horsetail |
+| IMG_6564 | corn | 6.8% | 14 | unidentified broadleaf (all low confidence) |
+| IMG_4547 | corn (wide) | 11.2% | 5 | giant ragweed |
+| IMG_4219 | soybean | 9.6% | 6 | waterhemp |
+| IMG_4220 | soybean | 10.2% | 8 | waterhemp |
+| 3AEE1239 | soybean (no-till) | 0% | 0 | none |
+| IMG_3922 | alfalfa (wide) | 1.4% | 45 | dandelion (16-box cap hit) |
+| IMG_3926 | alfalfa | 2.4% | 23 | dandelion |
+| IMG_6942 | alfalfa | 0% | 0 | none |
+
+**Open questions for review by eye** (overlays in `run_out/`):
+- Is the strip along the left soybean row in IMG_4220 really weeds?
+- Are the yellowish plants in the 3AEE1239 furrows weeds the agent missed?
+- In the no-till soybean photo, the crop masks spill over the soil between rows.
