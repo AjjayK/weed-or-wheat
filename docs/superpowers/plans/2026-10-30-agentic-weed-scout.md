@@ -218,6 +218,11 @@ def test_settings_defaults():
     settings = Settings(api_key="x")
     assert settings.base_url == "https://api.meta.ai/v1"
     assert settings.work_max_px == 1024 and settings.max_tool_calls == 12
+
+
+def test_public_site_defaults():
+    settings = Settings(api_key="x")
+    assert settings.walks_per_hour == 20 and settings.offset_gps is True
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -252,6 +257,8 @@ class Settings:
     max_photos: int = 10
     max_upload_bytes: int = 25_000_000
     walks_per_ip_per_hour: int = 3
+    walks_per_hour: int = 20  # site-wide; X-Forwarded-For can be faked, so this is the real cost guard
+    offset_gps: bool = True  # public site: shift every walk's pins by one random offset
 
 
 def get_settings() -> Settings:
@@ -265,7 +272,7 @@ def get_settings() -> Settings:
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_config.py -v`
-Expected: 2 passed
+Expected: 3 passed
 
 - [ ] **Step 6: Commit**
 
@@ -4050,8 +4057,8 @@ tool calls. Always respond with tool calls, not prose. Every coordinate is 0 to 
 FIELD_INSTRUCTIONS = """You are an agronomist writing the reasoning for a field scouting report. You receive JSON \
 with the species summary, the rule trace that produced the decision, and label-backed product options. Write at \
 most 120 words for a farmer: what was found, why the decision follows, and what to weigh among the options (for \
-example rotating herbicide groups). Use only numbers that appear in the JSON. Do not recommend a rate. End with: \
-"Read the label before use." """
+example rotating herbicide groups). Use only numbers that appear in the JSON. Do not recommend a rate. Plain text only, no \
+Markdown. End with: "Read the label before use." """
 ```
 
 - [ ] **Step 4: Write the stop agent**
@@ -5482,6 +5489,8 @@ git commit -m "feat: add field step with checked explanation"
 
 `tests/test_pipeline.py`:
 ```python
+import logging
+
 from scout.agent.state import StopState
 from scout.app.pipeline import Pipeline, Walk, walk_id_for
 from scout.config import Settings
@@ -5511,10 +5520,11 @@ def test_run_writes_report_and_overlays(tmp_path):
     assert kinds.count("stop_done") == 2 and kinds.count("step") == 2 and kinds[-1] == "report_ready"
     folder = pipeline.find_dir(walk.id)
     assert (folder / "report.json").exists() and (folder / "stop_1.png").exists()
+    assert not (folder / "report.json.tmp").exists()
     assert pipeline.cached(walk.id).walk_id == walk.id
 
 
-def test_failed_stop_does_not_sink_walk(tmp_path):
+def test_walk_where_every_stop_fails_is_failed_and_not_cached(tmp_path):
     def boom(*args, **kwargs):
         raise RuntimeError("api down")
 
@@ -5522,7 +5532,35 @@ def test_failed_stop_does_not_sink_walk(tmp_path):
     pipeline = _pipeline(tmp_path, boom)
     walk = Walk(id=walk_id_for("corn", images), crop="corn")
     pipeline.run(walk, images)
-    assert walk.status == "done" and walk.report.stops[0].status == "failed"
+    assert walk.status == "failed" and walk.events[-1]["type"] == "error"
+    assert pipeline.cached(walk.id) is None  # a retry must run the stops again, not replay the outage
+
+
+def test_failed_stop_does_not_sink_walk(tmp_path):
+    def flaky(image, *args, **kwargs):
+        if image.index == 1:
+            raise RuntimeError("api down")
+        return fake_runner(image, *args, **kwargs)
+
+    images = [make_image(index=0), make_image(index=1, color=(10, 10, 10))]
+    pipeline = _pipeline(tmp_path, flaky)
+    walk = Walk(id=walk_id_for("corn", images), crop="corn")
+    pipeline.run(walk, images)
+    assert walk.status == "done" and [s.status for s in walk.report.stops] == ["ok", "failed"]
+    assert pipeline.cached(walk.id) is not None
+
+
+def test_cache_hit_does_not_run_the_stops(tmp_path):
+    images = [make_image(index=0)]
+    walk_id = walk_id_for("corn", images)
+    _pipeline(tmp_path, fake_runner).run(Walk(id=walk_id, crop="corn"), images)
+
+    def never(*args, **kwargs):
+        raise AssertionError("stop runner called on a cache hit")
+
+    again = Walk(id=walk_id, crop="corn")
+    _pipeline(tmp_path, never).run(again, images)
+    assert again.status == "done" and again.report.walk_id == walk_id
 
 
 def test_walk_id_is_stable_and_hex():
@@ -5534,6 +5572,13 @@ def test_walk_id_is_stable_and_hex():
 
 def test_find_dir_rejects_bad_ids(tmp_path):
     assert _pipeline(tmp_path, fake_runner).find_dir("../etc") is None
+
+
+def test_from_settings_warns_when_label_table_is_empty(monkeypatch, caplog):
+    monkeypatch.setattr("scout.app.pipeline.load_records", lambda: [])
+    with caplog.at_level(logging.WARNING, logger="scout.app.pipeline"):
+        Pipeline.from_settings(Settings(api_key="t"))
+    assert "label table is empty" in caplog.text
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -5602,7 +5647,11 @@ class Pipeline:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "Pipeline":
-        return cls(Llm.from_settings(settings), SamClient.from_settings(settings), WeedBook.load(), load_records(),
+        records = load_records()
+        if not records:
+            log.warning("The label table is empty: every report will say no product matches. "
+                        "Build it with scout.labels.build_labels.")
+        return cls(Llm.from_settings(settings), SamClient.from_settings(settings), WeedBook.load(), records,
                    settings, Path(os.environ.get("SCOUT_STORE", "store")))
 
     def find_dir(self, walk_id: str) -> Path | None:
@@ -5633,8 +5682,12 @@ class Pipeline:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 with ThreadPoolExecutor(max_workers=self.settings.max_concurrent_stops) as pool:
                     stops = list(pool.map(lambda image: self._stop(walk, image, out_dir), images))
+                if all(stop.status == "failed" for stop in stops):  # an outage or a bad key: don't cache it
+                    raise RuntimeError("no stop could be analyzed")
                 report = build_report(walk.id, walk.crop, stops, self.weeds, self.records, self.llm)
-                (out_dir / "report.json").write_text(report.model_dump_json(indent=1), encoding="utf-8")
+                tmp = out_dir / "report.json.tmp"  # find_dir treats report.json as complete: write it atomically
+                tmp.write_text(report.model_dump_json(indent=1), encoding="utf-8")
+                os.replace(tmp, out_dir / "report.json")
             walk.report = report
             walk.emit({"type": "report_ready"})
             walk.status = "done"
@@ -5664,7 +5717,7 @@ class Pipeline:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_pipeline.py -v`
-Expected: 4 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
@@ -5683,6 +5736,9 @@ git commit -m "feat: add walk pipeline with cache and failure isolation"
 
 `tests/test_render.py`:
 ```python
+import re
+
+from scout.labels.epa import PDF_BASE
 from scout.models import FieldReport, LabelOption, SpeciesSummary, StopResult, UseRecord
 from scout.report.render import CSV_COLUMNS, report_csv, report_html
 from tests.helpers import small_weedbook
@@ -5704,23 +5760,68 @@ def _report(gps=None):
                        options=[LabelOption(record=record)])
 
 
+def _with_stops(*stops):
+    return _report().model_copy(update={"stops": list(stops)})
+
+
+def _html(report):
+    return report_html(report, small_weedbook(), lambda i: f"/o/{i}.png")
+
+
 def test_html_has_decision_options_and_overlays():
     html = report_html(_report(), small_weedbook(), lambda i: f"/walks/w1/overlay/{i}.png")
     assert "Treat (broadcast)" in html and "Product A (100-1)" in html
     assert "/walks/w1/overlay/0.png" in html and "Read the label before use" in html
-    assert "#page=3" in html and "Check s0-i6: low confidence" in html
+    assert f"{PDF_BASE}000100-00001-20240101.pdf#page=3" in html and "Check s0-i6: low confidence" in html
     assert "leaflet" not in html
 
 
+def test_options_table_names_the_weed_each_row_is_for():
+    assert re.search(r"<td>waterhemp</td>\s*<td>Product A \(100-1\)</td>", _html(_report()))
+
+
 def test_html_shows_map_when_gps_present():
-    html = report_html(_report(gps=(41.5, -93.6)), small_weedbook(), lambda i: f"/o/{i}.png")
-    assert "leaflet" in html and "41.5" in html
+    html = _html(_report(gps=(41.5, -93.6)))
+    assert "leaflet" in html and "41.5" in html and "Pins are shifted for privacy." in html
+
+
+def test_leaflet_assets_are_pinned_with_integrity_hashes():
+    html = _html(_report(gps=(41.5, -93.6)))
+    assert html.count("leaflet@1.9.4") == 2
+    assert html.count('integrity="sha256-') == 2 and html.count('crossorigin=""') == 2
+
+
+def test_mean_cover_card_skips_close_ups_like_the_rules():
+    html = _html(_with_stops(StopResult(stop_index=0, image_hash="a", weed_cover_pct=2.0),
+                             StopResult(stop_index=1, image_hash="b", weed_cover_pct=60.0, view_type="close_up")))
+    assert "Mean weed cover<b>2.0%</b>" in html
+
+
+def test_failed_stop_is_not_shown_as_zeros():
+    html = _html(_with_stops(StopResult(stop_index=0, image_hash="a", weed_cover_pct=2.0),
+                             StopResult(stop_index=1, image_hash="b", status="failed",
+                                        flags=["This stop could not be analyzed"])))
+    assert "Not analyzed; not used in the field numbers." in html and "Weed cover 0.0%" not in html
+    assert "This stop could not be analyzed" in html
+
+
+def test_model_text_is_escaped():
+    report = _report().model_copy(update={"explanation": "<script>alert(1)</script>"})
+    report.stops[0].crop_stage = "<img src=x onerror=alert(1)>"
+    html = _html(report)
+    assert "<script>alert(1)" not in html and "<img src=x" not in html and "&lt;script&gt;" in html
 
 
 def test_csv_has_one_row_per_stop():
     lines = report_csv(_report()).strip().splitlines()
     assert lines[0].split(",") == CSV_COLUMNS and len(lines) == 2
     assert "waterhemp:2" in lines[1]
+
+
+def test_csv_leaves_a_failed_stops_numbers_blank():
+    report = _with_stops(StopResult(stop_index=2, image_hash="c", status="failed",
+                                    flags=["This stop could not be analyzed"]))
+    assert report_csv(report).strip().splitlines()[-1] == "3,failed,,,,,,,,,,This stop could not be analyzed"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -5788,15 +5889,16 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.report.render'`
 <h2>Label-backed options</h2>
 {% if report.options %}
 <div class="table-wrap"><table>
-  <tr><th>Product (EPA reg. no.)</th><th>Group</th><th>Limits</th><th>Rate</th><th>Pre-harvest interval</th><th>Source</th></tr>
+  <tr><th>For</th><th>Product (EPA reg. no.)</th><th>Group</th><th>Limits</th><th>Rate</th><th>Pre-harvest interval</th><th>Source</th></tr>
   {% for o in report.options %}{% set r = o.record %}
   <tr>
+    <td>{{ names.get(r.species_id, r.species_id) }}</td>
     <td>{{ r.product_name }} ({{ r.reg_no }})</td>
     <td>{{ r.herbicide_groups|join(", ") }}</td>
     <td>{% if r.max_weed_height_in is not none %}Weeds up to {{ r.max_weed_height_in }} in{% endif %}{% if r.crop_stage_max %} · crop up to {{ r.crop_stage_max }}{% endif %}{% if o.over_size_limit %}<div class="flag">Weeds are over this size limit</div>{% endif %}</td>
     <td>{% if r.rate_min is not none %}{{ r.rate_min }}{% if r.rate_max is not none and r.rate_max != r.rate_min %}–{{ r.rate_max }}{% endif %} {{ r.rate_unit or "" }}{% else %}—{% endif %}</td>
     <td>{{ (r.phi_days|string + " days") if r.phi_days is not none else "—" }}</td>
-    <td>{% if r.pdf_file %}<a href="https://www3.epa.gov/pesticides/chem_search/ppls/{{ r.pdf_file }}#page={{ r.page }}">p. {{ r.page }}</a>{% else %}p. {{ r.page }}{% endif %}<div class="muted">“{{ r.quote }}”</div></td>
+    <td>{% if r.pdf_file %}<a href="{{ pdf_base }}{{ r.pdf_file }}#page={{ r.page }}">p. {{ r.page }}</a>{% else %}p. {{ r.page }}{% endif %}<div class="muted">“{{ r.quote }}”</div></td>
   </tr>
   {% endfor %}
 </table></div>
@@ -5807,8 +5909,9 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.report.render'`
 {% if pins %}
 <h2>Stops on the map</h2>
 <div id="map" style="height: 280px; border-radius: 10px;"></div>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<p class="muted">Pins are shifted for privacy.</p>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
   const pins = {{ pins | map(attribute="gps") | list | tojson }};
   const labels = {{ pins | map(attribute="stop_index") | list | tojson }};
@@ -5826,8 +5929,9 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.report.render'`
   <div class="card">
     <img src="{{ overlay_url(s.stop_index) }}" alt="Stop {{ s.stop_index + 1 }}: crop in green, weeds in magenta">
     <b>Stop {{ s.stop_index + 1 }}</b>
+    {% if s.status == "failed" %}<p class="muted">Not analyzed; not used in the field numbers.</p>{% else %}
     <span class="muted">{{ s.view_type.replace("_", " ") }}{% if s.crop_stage %} · crop {{ s.crop_stage }}{% endif %} · {{ s.status.replace("_", " ") }}</span>
-    <p>Weed cover {{ s.weed_cover_pct }}% · {{ s.weed_count }} weeds{% if s.count_approximate %} (approx.){% endif %}{% if s.density_per_m2 is not none %} · {{ s.density_per_m2 }}/m²{% endif %}</p>
+    <p>Weed cover {{ s.weed_cover_pct }}% · {{ s.weed_count }} weeds{% if s.count_approximate %} (approx.){% endif %}{% if s.density_per_m2 is not none %} · {{ s.density_per_m2 }}/m²{% endif %}</p>{% endif %}
     {% for f in s.flags %}<div class="flag">{{ f }}</div>{% endfor %}
   </div>
 {% endfor %}
@@ -5850,7 +5954,8 @@ from typing import Callable
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from scout.agronomy.weeds import WeedBook
-from scout.models import FieldReport
+from scout.labels.epa import PDF_BASE
+from scout.models import FieldReport, StopResult
 
 _ENV = Environment(loader=FileSystemLoader(Path(__file__).with_name("templates")),
                    autoescape=select_autoescape(["html"]))
@@ -5865,13 +5970,14 @@ def _blank(value) -> object:
 
 def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int], str]) -> str:
     ok = [s for s in report.stops if s.status == "ok"]
+    measured = [s for s in ok if s.view_type != "close_up"] or ok  # the stops rules.py averages
     densities = [s.density_per_m2 for s in ok if s.density_per_m2 is not None]
     names = {s.species_id: weeds.get(s.species_id).common_name if s.species_id in weeds else s.species_id
              for s in report.species_summary}
     decision = OUTCOME_TEXT[report.decision] + (f" ({report.treat_mode})" if report.treat_mode else "")
     return _ENV.get_template("report.html").render(
         report=report,
-        mean_cover=sum(s.weed_cover_pct for s in ok) / len(ok) if ok else 0.0,
+        mean_cover=sum(s.weed_cover_pct for s in measured) / len(measured) if measured else 0.0,
         density_text=f"{sum(densities) / len(densities):.1f} /m²" if densities else "—",
         stops_with_weeds=sum(1 for s in ok if s.weed_count),
         ok_count=len(ok),
@@ -5879,7 +5985,17 @@ def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int
         names=names,
         outcome_text=OUTCOME_TEXT,
         overlay_url=overlay_url,
+        pdf_base=PDF_BASE,
     )
+
+
+def _csv_row(s: StopResult) -> list:
+    flags = " | ".join(s.flags)
+    if s.status == "failed":  # the zeros of a failed stop are placeholders, not measurements
+        return [s.stop_index + 1, s.status] + [""] * (len(CSV_COLUMNS) - 3) + [flags]
+    return [s.stop_index + 1, s.status, s.view_type, s.weed_cover_pct, s.crop_cover_pct, s.weed_count,
+            s.count_approximate, _blank(s.density_per_m2), _blank(s.in_row_weed_share),
+            ";".join(f"{k}:{v}" for k, v in s.species.items()), _blank(s.max_height_in), flags]
 
 
 def report_csv(report: FieldReport) -> str:
@@ -5887,17 +6003,14 @@ def report_csv(report: FieldReport) -> str:
     writer = csv.writer(buf)
     writer.writerow(CSV_COLUMNS)
     for s in report.stops:
-        writer.writerow([s.stop_index + 1, s.status, s.view_type, s.weed_cover_pct, s.crop_cover_pct, s.weed_count,
-                         s.count_approximate, _blank(s.density_per_m2), _blank(s.in_row_weed_share),
-                         ";".join(f"{k}:{v}" for k, v in s.species.items()), _blank(s.max_height_in),
-                         " | ".join(s.flags)])
+        writer.writerow(_csv_row(s))
     return buf.getvalue()
 ```
 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_render.py -v`
-Expected: 3 passed
+Expected: 9 passed
 
 - [ ] **Step 6: Commit**
 
@@ -5977,6 +6090,7 @@ const form = document.getElementById("walk-form");
 const errorBox = document.getElementById("form-error");
 const stopsBox = document.getElementById("stops");
 const statusBox = document.getElementById("status");
+const button = form.querySelector("button");
 
 function showError(message) {
   errorBox.textContent = message;
@@ -6006,8 +6120,12 @@ function addLine(index, text, className) {
 
 function follow(walkId) {
   document.getElementById("progress").hidden = false;
+  stopsBox.replaceChildren();
   statusBox.textContent = "Working…";
   const events = new EventSource(`/walks/${walkId}/events`);
+  events.onopen = () => {
+    statusBox.textContent = "Working…";
+  };
   events.onmessage = (message) => {
     const event = JSON.parse(message.data);
     if (event.type === "step") {
@@ -6016,13 +6134,24 @@ function follow(walkId) {
       addLine(event.stop, event.status === "ok" ? "Stop done" : `Stop ${event.status.replaceAll("_", " ")}`, "done");
     } else if (event.type === "report_ready") {
       events.close();
+      button.disabled = false;
       window.location.href = `/walks/${walkId}/report`;
     } else if (event.type === "error") {
       events.close();
+      button.disabled = false;
       statusBox.textContent = event.message;
     }
   };
-  events.onerror = () => events.close();
+  // The browser reconnects by itself and sends Last-Event-ID, so an error is not the end. It gives up (CLOSED)
+  // when the server no longer knows the walk, for example after a restart.
+  events.onerror = () => {
+    if (events.readyState === EventSource.CLOSED) {
+      button.disabled = false;
+      statusBox.textContent = "Lost track of this walk. Reload and upload the photos again.";
+    } else {
+      statusBox.textContent = "Connection dropped. Reconnecting…";
+    }
+  };
 }
 
 form.addEventListener("submit", async (submitEvent) => {
@@ -6033,18 +6162,20 @@ form.addEventListener("submit", async (submitEvent) => {
     showError("Pick 1 to 10 photos.");
     return;
   }
-  const button = form.querySelector("button");
+  button.disabled = true;
   button.textContent = "Uploading…";
   try {
     const response = await fetch("/walks", { method: "POST", body: new FormData(form) });
     const body = await response.json();
     if (!response.ok) {
-      showError(body.detail || "Upload failed. Try again.");
+      showError(typeof body.detail === "string" ? body.detail : "Upload failed. Try again.");
+      button.disabled = false;
       return;
     }
     follow(body.walk_id);
   } catch {
     showError("Couldn't reach the server. Try again.");
+    button.disabled = false;
   } finally {
     button.textContent = "Scout this field";
   }
@@ -6085,7 +6216,11 @@ git commit -m "feat: add upload page with live agent steps"
 
 `tests/test_main.py`:
 ```python
+import io
+import threading
+
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from scout.app.main import create_app
 from scout.config import Settings
@@ -6122,13 +6257,33 @@ class FakePipeline:
         walk.status = "done"
 
 
-def _client(tmp_path, **settings):
-    return TestClient(create_app(FakePipeline(tmp_path), Settings(api_key="t", **settings)))
+def _client(tmp_path, pipeline=None, **settings):
+    return TestClient(create_app(pipeline or FakePipeline(tmp_path), Settings(api_key="t", **settings)))
 
 
-def _upload(client, n=1, crop="soybean", shade=0):
+def _upload(client, n=1, crop="soybean", shade=0, headers=None):
     files = [("files", (f"p{i}.png", png_bytes(40, 40, (i, 100, shade)), "image/png")) for i in range(n)]
-    return client.post("/walks", data={"crop": crop}, files=files)
+    return client.post("/walks", data={"crop": crop}, files=files, headers=headers)
+
+
+def _jpeg_with_gps(lat_minutes, color):
+    exif = Image.Exif()
+    exif[0x8825] = {1: "N", 2: (41.0, lat_minutes, 0.0), 3: "W", 4: (93.0, 36.0, 0.0)}  # 41 + m/60 N, 93.6 W
+    buf = io.BytesIO()
+    Image.new("RGB", (60, 40), color).save(buf, format="JPEG", exif=exif.tobytes())
+    return buf.getvalue()
+
+
+def _upload_gps_photos(client):
+    files = [("files", (f"p{i}.jpg", _jpeg_with_gps(30.0 + i, (i * 40, 90, 60)), "image/jpeg")) for i in range(2)]
+    walk_id = client.post("/walks", data={"crop": "soybean"}, files=files).json()["walk_id"]
+    client.get(f"/walks/{walk_id}/events")  # returns once the walk has run
+
+
+class GpsCapture(FakePipeline):
+    def run(self, walk, images):
+        self.gps = [image.gps for image in images]
+        super().run(walk, images)
 
 
 def test_walk_flow(tmp_path):
@@ -6153,6 +6308,77 @@ def test_rate_limit_per_ip(tmp_path):
     assert _upload(client, shade=2).status_code == 429
 
 
+def test_rate_limit_counts_the_visitor_behind_the_proxy(tmp_path):
+    client = _client(tmp_path, walks_per_ip_per_hour=1)
+    assert _upload(client, shade=1, headers={"X-Forwarded-For": "1.1.1.1, 10.0.0.1"}).status_code == 200
+    assert _upload(client, shade=2, headers={"X-Forwarded-For": "2.2.2.2, 10.0.0.1"}).status_code == 200
+    assert _upload(client, shade=3, headers={"X-Forwarded-For": "1.1.1.1, 10.0.0.1"}).status_code == 429
+
+
+def test_site_wide_hourly_cap(tmp_path):
+    client = _client(tmp_path, walks_per_hour=1)
+    assert _upload(client, shade=1, headers={"X-Forwarded-For": "1.1.1.1"}).status_code == 200
+    assert _upload(client, shade=2, headers={"X-Forwarded-For": "2.2.2.2"}).status_code == 429
+
+
+def test_oversize_photo_is_rejected_before_any_photo_is_decoded(tmp_path, monkeypatch):
+    decoded = []
+    monkeypatch.setattr("scout.app.main.load_image", lambda *args: decoded.append(args))
+    client = _client(tmp_path, max_upload_bytes=500)
+    files = [("files", ("ok.png", png_bytes(40, 40), "image/png")), ("files", ("big.png", b"x" * 600, "image/png"))]
+    response = client.post("/walks", data={"crop": "soybean"}, files=files)
+    assert response.status_code == 400 and response.json()["detail"].startswith("big.png is over")
+    assert decoded == []
+
+
+def test_body_over_the_limit_is_413(tmp_path):
+    client = _client(tmp_path, max_upload_bytes=100, max_photos=1)  # limit: 100 bytes of photo + 1 MB of form
+    files = [("files", ("p.png", b"x" * 1_100_000, "image/png"))]
+    response = client.post("/walks", data={"crop": "soybean"}, files=files)
+    assert response.status_code == 413 and response.json() == {"detail": "That upload is too large."}
+
+
+def test_events_resume_from_last_event_id(tmp_path):
+    client = _client(tmp_path)
+    walk_id = _upload(client).json()["walk_id"]
+    full = client.get(f"/walks/{walk_id}/events")
+    assert "id: 0\n" in full.text and "id: 1\n" in full.text
+    assert full.headers["cache-control"] == "no-cache" and full.headers["x-accel-buffering"] == "no"
+    resumed = client.get(f"/walks/{walk_id}/events", headers={"Last-Event-ID": "0"}).text
+    assert '"type": "step"' not in resumed and "report_ready" in resumed
+
+
+def test_idle_stream_sends_keep_alive_comments(tmp_path, monkeypatch):
+    release = threading.Event()
+
+    class Slow(FakePipeline):
+        def run(self, walk, images):
+            release.wait(5)
+            super().run(walk, images)
+
+    monkeypatch.setattr("scout.app.main.KEEP_ALIVE_S", 0.3)
+    client = _client(tmp_path, pipeline=Slow(tmp_path))
+    walk_id = _upload(client).json()["walk_id"]
+    threading.Timer(0.8, release.set).start()
+    body = client.get(f"/walks/{walk_id}/events").text
+    assert ": keep-alive\n\n" in body and "report_ready" in body
+
+
+def test_gps_is_shifted_once_per_walk(tmp_path):
+    pipeline = GpsCapture(tmp_path)
+    _upload_gps_photos(_client(tmp_path, pipeline=pipeline))
+    (lat_a, lon_a), (lat_b, lon_b) = pipeline.gps
+    assert (lat_a, lon_a) != (41.5, -93.6)
+    assert abs(lat_a - 41.5) <= 0.500001 and abs(lon_a + 93.6) <= 0.500001
+    assert round(lat_b - lat_a, 4) == round(1 / 60, 4) and round(lon_b - lon_a, 6) == 0  # pin layout kept
+
+
+def test_gps_is_kept_when_the_offset_is_off(tmp_path):
+    pipeline = GpsCapture(tmp_path)
+    _upload_gps_photos(_client(tmp_path, pipeline=pipeline, offset_gps=False))
+    assert pipeline.gps == [(41.5, -93.6), (41.516667, -93.6)]
+
+
 def test_unknown_walk_is_404_and_samples_listed(tmp_path):
     client = _client(tmp_path)
     assert client.get("/walks/ffffffffffffffff/report").status_code == 404
@@ -6172,13 +6398,14 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.app.main'`
 """HTTP app. Run locally: uvicorn scout.app.main:create_app --factory --port 8000"""
 import asyncio
 import json
+import random
 import threading
 import time
 from collections import defaultdict
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from scout.app.ingest import load_image
@@ -6189,6 +6416,8 @@ from scout.report.render import report_csv, report_html
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 CROPS = {"corn", "soybean", "alfalfa"}
+POLL_S = 0.3  # how often an event stream looks for new events
+KEEP_ALIVE_S = 15  # a Muse Spark turn can take 15+ s; a comment this often keeps proxies from closing a quiet stream
 
 
 def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
@@ -6198,6 +6427,20 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
     walks: dict[str, Walk] = {}
     recent: dict[str, list[float]] = defaultdict(list)
+    recent_all: list[float] = []
+    body_limit = settings.max_photos * settings.max_upload_bytes + 1_000_000
+
+    @app.middleware("http")
+    async def limit_body(request: Request, call_next):
+        # Runs before Starlette spools the multipart body to disk; browsers always send Content-Length.
+        if request.method == "POST" and int(request.headers.get("content-length") or 0) > body_limit:
+            return JSONResponse({"detail": "That upload is too large."}, status_code=413)
+        return await call_next(request)
+
+    def client_ip(request: Request) -> str:
+        # On a Hugging Face Space request.client is the proxy; the visitor is the first X-Forwarded-For entry.
+        forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        return forwarded or (request.client.host if request.client else "unknown")
 
     def report_for(walk_id: str) -> FieldReport:
         walk = walks.get(walk_id)
@@ -6220,51 +6463,70 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, "Pick corn, soybean, or alfalfa.")
         if not 1 <= len(files) <= settings.max_photos:
             raise HTTPException(400, f"Upload 1 to {settings.max_photos} photos.")
+        for upload in files:  # sizes are known once the form is parsed: check them all before reading any photo
+            if (upload.size or 0) > settings.max_upload_bytes:
+                raise HTTPException(400, f"{upload.filename} is over {settings.max_upload_bytes // 1_000_000} MB.")
         images = []
         for index, upload in enumerate(files):
             data = await upload.read()
-            if len(data) > settings.max_upload_bytes:
-                raise HTTPException(400, f"{upload.filename} is over {settings.max_upload_bytes // 1_000_000} MB.")
             try:
                 # In a thread: decoding takes 0.5-1.5 s per photo and would otherwise stall every SSE stream.
                 images.append(await asyncio.to_thread(load_image, index, data, settings.full_max_px, settings.work_max_px))
             except Exception:
                 raise HTTPException(400, f"{upload.filename} isn't a photo we can read.") from None
+        if settings.offset_gps:  # public site: one random shift per walk hides the farm and keeps the pin layout
+            d_lat, d_lon = random.uniform(-0.5, 0.5), random.uniform(-0.5, 0.5)
+            for image in images:
+                if image.gps:
+                    image.gps = (round(image.gps[0] + d_lat, 6), round(image.gps[1] + d_lon, 6))
         walk_id = walk_id_for(crop, images)
         if walk_id in walks and walks[walk_id].status != "failed":
             return {"walk_id": walk_id}
         if pipeline.cached(walk_id) is None:
-            ip = request.client.host if request.client else "unknown"
+            ip = client_ip(request)
             now = time.time()
-            recent[ip] = [t for t in recent[ip] if now - t < 3600]
-            if len(recent[ip]) >= settings.walks_per_ip_per_hour:
+            for key in list(recent):  # forget visitors whose last walk is over an hour old
+                recent[key] = [t for t in recent[key] if now - t < 3600]
+                if not recent[key]:
+                    del recent[key]
+            recent_all[:] = [t for t in recent_all if now - t < 3600]
+            if len(recent.get(ip, ())) >= settings.walks_per_ip_per_hour or len(recent_all) >= settings.walks_per_hour:
                 raise HTTPException(429, "You've reached the hourly limit. Open a sample walk instead.")
             recent[ip].append(now)
+            recent_all.append(now)
         walk = Walk(id=walk_id, crop=crop)
         walks[walk_id] = walk
         threading.Thread(target=pipeline.run, args=(walk, images), daemon=True).start()
         return {"walk_id": walk_id}
 
     @app.get("/walks/{walk_id}/events")
-    async def events(walk_id: str):
+    async def events(walk_id: str, request: Request):
         walk = walks.get(walk_id)
         if walk is None:
             if pipeline.cached(walk_id) is None:
                 raise HTTPException(404, "Unknown walk.")
             walk = Walk(id=walk_id, crop="", status="done", events=[{"type": "report_ready"}])
+        last = request.headers.get("last-event-id", "")
+        start = int(last) + 1 if last.isdigit() else 0  # EventSource sends it when it reconnects: resume, don't replay
 
         async def stream():
-            sent = 0
+            sent, quiet = start, 0.0
             while True:
                 done = walk.status != "running"  # read first: events are appended before status changes
                 while sent < len(walk.events):
-                    yield f"data: {json.dumps(walk.events[sent])}\n\n"
+                    yield f"id: {sent}\ndata: {json.dumps(walk.events[sent])}\n\n"
                     sent += 1
+                    quiet = 0.0
                 if done:
                     break
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(POLL_S)
+                quiet += POLL_S
+                if quiet >= KEEP_ALIVE_S:
+                    yield ": keep-alive\n\n"
+                    quiet = 0.0
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/walks/{walk_id}/report", response_class=HTMLResponse)
     def report_page(walk_id: str):
@@ -6293,7 +6555,7 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_main.py -v`
-Expected: 4 passed
+Expected: 12 passed
 
 - [ ] **Step 5: Run the whole suite and commit**
 
