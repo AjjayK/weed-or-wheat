@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weed scout</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <h1>Weed scout</h1>
+  <p class="lede">Upload the photos from one walk through one field. An agent finds the weeds, measures them, and checks herbicide labels.</p>
+  <form id="walk-form">
+    <label>Crop
+      <select name="crop" required>
+        <option value="soybean">Soybean</option>
+        <option value="corn">Corn</option>
+        <option value="alfalfa">Alfalfa</option>
+      </select>
+    </label>
+    <label>Photos (1 to 10)
+      <input type="file" name="files" accept="image/*,.heic,.heif" multiple required>
+    </label>
+    <button type="submit">Scout this field</button>
+    <p id="form-error" class="error" hidden></p>
+  </form>
+  <section id="samples" hidden>
+    <h2>Or open a sample walk</h2>
+    <ul id="sample-list"></ul>
+  </section>
+  <section id="progress" hidden>
+    <h2>Agent steps</h2>
+    <div id="stops"></div>
+    <p id="status" class="muted"></p>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
