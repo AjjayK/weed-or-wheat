@@ -5346,6 +5346,23 @@ def test_no_label_match_is_stated():
     report = build_report("w1", "soybean", _stops(), BOOK, [], FakeLlm([]))
     assert report.options == []
     assert any("No product in the current label set covers waterhemp on soybean" in line for line in report.rule_trace)
+
+
+def test_one_product_listed_for_each_treated_weed_and_unidentified_asks_for_an_id():
+    book = WeedBook({**{sid: BOOK.get(sid) for sid in BOOK.ids()},
+                     "velvetleaf": WeedInfo(id="velvetleaf", common_name="velvetleaf", scientific_name="A. theophrasti",
+                                            type="broadleaf", zero_tolerance=True, sources=["src"]),
+                     "unidentified_broadleaf": WeedInfo(id="unidentified_broadleaf", common_name="unidentified broadleaf",
+                                                        scientific_name="", type="broadleaf", zero_tolerance=True,
+                                                        sources=["src"])})
+    stops = [StopResult(stop_index=0, image_hash="a", species={"waterhemp": 1, "velvetleaf": 1, "unidentified_broadleaf": 1},
+                        species_cover_pct={"waterhemp": 1.0, "velvetleaf": 1.0, "unidentified_broadleaf": 1.0},
+                        weed_cover_pct=3.0, weed_count=3)]
+    velvetleaf = RECORD.model_copy(update={"species_id": "velvetleaf", "weed_label_text": "velvetleaf"})
+    report = build_report("w1", "soybean", stops, book, [RECORD, velvetleaf], FakeLlm([]))
+    assert [(o.record.reg_no, o.record.species_id) for o in report.options] == [("100-1", "velvetleaf"), ("100-1", "waterhemp")]
+    assert any(line.startswith("Identify the unidentified broadleaf") for line in report.rule_trace)
+    assert not any("covers unidentified" in line for line in report.rule_trace)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -5400,21 +5417,25 @@ def build_report(walk_id: str, crop: str, stops: list[StopResult], weeds: WeedBo
     stages = Counter(s.crop_stage for s in stops if s.status == "ok" and s.crop_stage)
     stage = stages.most_common(1)[0][0] if stages else None
     options: list[LabelOption] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     urgency_text = None
     for summary in d.summaries:
         if summary.outcome != "treat":
             continue
+        name = weeds.get(summary.species_id).common_name
+        if summary.species_id.startswith("unidentified"):
+            d.rule_trace.append(f"Identify the {name} to choose a product; labels name specific weeds")
+            continue
         found = find_label_options(records, crop, summary.species_id, summary.max_height_in, stage)
         if not found:
-            d.rule_trace.append(f"No product in the current label set covers "
-                                f"{weeds.get(summary.species_id).common_name} on {crop}")
+            d.rule_trace.append(f"No product in the current label set covers {name} on {crop}")
         candidate = urgency(summary.max_height_in, found)
         if _urgency_rank(candidate) < _urgency_rank(urgency_text):
             urgency_text = candidate
         for option in found:
-            if option.record.reg_no not in seen:
-                seen.add(option.record.reg_no)
+            key = (option.record.reg_no, option.record.species_id)  # one product can cover several treated weeds
+            if key not in seen:
+                seen.add(key)
                 options.append(option)
     payload = json.dumps({
         "crop": crop, "decision": d.decision, "treat_mode": d.treat_mode, "urgency": urgency_text,
@@ -5442,7 +5463,7 @@ def build_report(walk_id: str, crop: str, stops: list[StopResult], weeds: WeedBo
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_field_agent.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
