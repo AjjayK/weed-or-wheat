@@ -126,3 +126,24 @@ Muse Spark gave a tight box per weed in 0–1000 coordinates, and all of a photo
 - Is the strip along the left soybean row in IMG_4220 really weeds?
 - Are the yellowish plants in the 3AEE1239 furrows weeds the agent missed?
 - In the no-till soybean photo, the crop masks spill over the soil between rows.
+
+## Label table (Task 23, 2026-11-01)
+
+**Trial, 2 products (old prompt):** Roundup PowerMAX 3 kept 57 of 58 records, Callisto 18 of 18, in 7.5 minutes. Two prompt fixes followed:
+- Roundup's soybean section points to a weeds table elsewhere in the label, and only 6 soybean records came back. The prompt now says to follow such a pointer. Result after the fix: 25 soybean records.
+- Callisto's table rates some weeds "PC" (partial control, which the label calls below commercially acceptable) when Callisto is used alone. The prompt now skips partial-control and suppression-only weeds. Palmer amaranth, kochia, horseweed, morningglory, yellow nutsedge and common ragweed then dropped out of Callisto's corn records.
+
+**Full build, 20 products:** 483 records kept, 44 dropped by the quote check, in 45 minutes.
+- **Cadet kept 0 of 16:** its weed table (Table 2) is an image in the PDF, so none of the quotes appear in the PDF's text layer and the quote check dropped them all.
+- **Partial drops:** Accent Q 6, Raptor 12, Butyrac 200 6, Roundup 3, Pursuit 1.
+- **Not shown as options:** 16 records are tagged something other than postemergence (Callisto on soybean is preemergence; one Select Max corn record is burndown), and the lookup only lists postemergence uses.
+- **Weak quotes:** 239 of the 467 postemergence records quote a weed's row in a label table (for example "Waterhemp, common"). This proves the weed is listed on that page. The height limit and rate come from elsewhere on the label, so the hand check should look at those.
+- **Demo pairs (postemergence products):**
+  - waterhemp in soybean: 6
+  - giant ragweed in corn: 8
+  - giant ragweed in soybean: 9
+  - giant foxtail in corn: 5
+  - dandelion in alfalfa: 1 (Sencor)
+  - field horsetail in corn: 0
+
+**Hand check (Step 5):** pending, done by the user.
