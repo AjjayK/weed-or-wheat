@@ -15,3 +15,8 @@ def test_settings_defaults():
     settings = Settings(api_key="x")
     assert settings.base_url == "https://api.meta.ai/v1"
     assert settings.work_max_px == 1024 and settings.max_tool_calls == 12
+
+
+def test_public_site_defaults():
+    settings = Settings(api_key="x")
+    assert settings.walks_per_hour == 20 and settings.offset_gps is True

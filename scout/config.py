@@ -21,6 +21,8 @@ class Settings:
     max_photos: int = 10
     max_upload_bytes: int = 25_000_000
     walks_per_ip_per_hour: int = 3
+    walks_per_hour: int = 20  # site-wide; X-Forwarded-For can be faked, so this is the real cost guard
+    offset_gps: bool = True  # public site: shift every walk's pins by one random offset
 
 
 def get_settings() -> Settings:

@@ -7,7 +7,8 @@ from typing import Callable
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from scout.agronomy.weeds import WeedBook
-from scout.models import FieldReport
+from scout.labels.epa import PDF_BASE
+from scout.models import FieldReport, StopResult
 
 _ENV = Environment(loader=FileSystemLoader(Path(__file__).with_name("templates")),
                    autoescape=select_autoescape(["html"]))
@@ -22,13 +23,14 @@ def _blank(value) -> object:
 
 def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int], str]) -> str:
     ok = [s for s in report.stops if s.status == "ok"]
+    measured = [s for s in ok if s.view_type != "close_up"] or ok  # the stops rules.py averages
     densities = [s.density_per_m2 for s in ok if s.density_per_m2 is not None]
     names = {s.species_id: weeds.get(s.species_id).common_name if s.species_id in weeds else s.species_id
              for s in report.species_summary}
     decision = OUTCOME_TEXT[report.decision] + (f" ({report.treat_mode})" if report.treat_mode else "")
     return _ENV.get_template("report.html").render(
         report=report,
-        mean_cover=sum(s.weed_cover_pct for s in ok) / len(ok) if ok else 0.0,
+        mean_cover=sum(s.weed_cover_pct for s in measured) / len(measured) if measured else 0.0,
         density_text=f"{sum(densities) / len(densities):.1f} /m²" if densities else "—",
         stops_with_weeds=sum(1 for s in ok if s.weed_count),
         ok_count=len(ok),
@@ -36,7 +38,17 @@ def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int
         names=names,
         outcome_text=OUTCOME_TEXT,
         overlay_url=overlay_url,
+        pdf_base=PDF_BASE,
     )
+
+
+def _csv_row(s: StopResult) -> list:
+    flags = " | ".join(s.flags)
+    if s.status == "failed":  # the zeros of a failed stop are placeholders, not measurements
+        return [s.stop_index + 1, s.status] + [""] * (len(CSV_COLUMNS) - 3) + [flags]
+    return [s.stop_index + 1, s.status, s.view_type, s.weed_cover_pct, s.crop_cover_pct, s.weed_count,
+            s.count_approximate, _blank(s.density_per_m2), _blank(s.in_row_weed_share),
+            ";".join(f"{k}:{v}" for k, v in s.species.items()), _blank(s.max_height_in), flags]
 
 
 def report_csv(report: FieldReport) -> str:
@@ -44,8 +56,5 @@ def report_csv(report: FieldReport) -> str:
     writer = csv.writer(buf)
     writer.writerow(CSV_COLUMNS)
     for s in report.stops:
-        writer.writerow([s.stop_index + 1, s.status, s.view_type, s.weed_cover_pct, s.crop_cover_pct, s.weed_count,
-                         s.count_approximate, _blank(s.density_per_m2), _blank(s.in_row_weed_share),
-                         ";".join(f"{k}:{v}" for k, v in s.species.items()), _blank(s.max_height_in),
-                         " | ".join(s.flags)])
+        writer.writerow(_csv_row(s))
     return buf.getvalue()

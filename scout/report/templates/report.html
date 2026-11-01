@@ -54,15 +54,16 @@
 <h2>Label-backed options</h2>
 {% if report.options %}
 <div class="table-wrap"><table>
-  <tr><th>Product (EPA reg. no.)</th><th>Group</th><th>Limits</th><th>Rate</th><th>Pre-harvest interval</th><th>Source</th></tr>
+  <tr><th>For</th><th>Product (EPA reg. no.)</th><th>Group</th><th>Limits</th><th>Rate</th><th>Pre-harvest interval</th><th>Source</th></tr>
   {% for o in report.options %}{% set r = o.record %}
   <tr>
+    <td>{{ names.get(r.species_id, r.species_id) }}</td>
     <td>{{ r.product_name }} ({{ r.reg_no }})</td>
     <td>{{ r.herbicide_groups|join(", ") }}</td>
     <td>{% if r.max_weed_height_in is not none %}Weeds up to {{ r.max_weed_height_in }} in{% endif %}{% if r.crop_stage_max %} · crop up to {{ r.crop_stage_max }}{% endif %}{% if o.over_size_limit %}<div class="flag">Weeds are over this size limit</div>{% endif %}</td>
     <td>{% if r.rate_min is not none %}{{ r.rate_min }}{% if r.rate_max is not none and r.rate_max != r.rate_min %}–{{ r.rate_max }}{% endif %} {{ r.rate_unit or "" }}{% else %}—{% endif %}</td>
     <td>{{ (r.phi_days|string + " days") if r.phi_days is not none else "—" }}</td>
-    <td>{% if r.pdf_file %}<a href="https://www3.epa.gov/pesticides/chem_search/ppls/{{ r.pdf_file }}#page={{ r.page }}">p. {{ r.page }}</a>{% else %}p. {{ r.page }}{% endif %}<div class="muted">“{{ r.quote }}”</div></td>
+    <td>{% if r.pdf_file %}<a href="{{ pdf_base }}{{ r.pdf_file }}#page={{ r.page }}">p. {{ r.page }}</a>{% else %}p. {{ r.page }}{% endif %}<div class="muted">“{{ r.quote }}”</div></td>
   </tr>
   {% endfor %}
 </table></div>
@@ -73,8 +74,9 @@
 {% if pins %}
 <h2>Stops on the map</h2>
 <div id="map" style="height: 280px; border-radius: 10px;"></div>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<p class="muted">Pins are shifted for privacy.</p>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
   const pins = {{ pins | map(attribute="gps") | list | tojson }};
   const labels = {{ pins | map(attribute="stop_index") | list | tojson }};
@@ -92,8 +94,9 @@
   <div class="card">
     <img src="{{ overlay_url(s.stop_index) }}" alt="Stop {{ s.stop_index + 1 }}: crop in green, weeds in magenta">
     <b>Stop {{ s.stop_index + 1 }}</b>
+    {% if s.status == "failed" %}<p class="muted">Not analyzed; not used in the field numbers.</p>{% else %}
     <span class="muted">{{ s.view_type.replace("_", " ") }}{% if s.crop_stage %} · crop {{ s.crop_stage }}{% endif %} · {{ s.status.replace("_", " ") }}</span>
-    <p>Weed cover {{ s.weed_cover_pct }}% · {{ s.weed_count }} weeds{% if s.count_approximate %} (approx.){% endif %}{% if s.density_per_m2 is not none %} · {{ s.density_per_m2 }}/m²{% endif %}</p>
+    <p>Weed cover {{ s.weed_cover_pct }}% · {{ s.weed_count }} weeds{% if s.count_approximate %} (approx.){% endif %}{% if s.density_per_m2 is not none %} · {{ s.density_per_m2 }}/m²{% endif %}</p>{% endif %}
     {% for f in s.flags %}<div class="flag">{{ f }}</div>{% endfor %}
   </div>
 {% endfor %}

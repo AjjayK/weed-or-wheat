@@ -2,6 +2,7 @@ const form = document.getElementById("walk-form");
 const errorBox = document.getElementById("form-error");
 const stopsBox = document.getElementById("stops");
 const statusBox = document.getElementById("status");
+const button = form.querySelector("button");
 
 function showError(message) {
   errorBox.textContent = message;
@@ -31,8 +32,12 @@ function addLine(index, text, className) {
 
 function follow(walkId) {
   document.getElementById("progress").hidden = false;
+  stopsBox.replaceChildren();
   statusBox.textContent = "Working…";
   const events = new EventSource(`/walks/${walkId}/events`);
+  events.onopen = () => {
+    statusBox.textContent = "Working…";
+  };
   events.onmessage = (message) => {
     const event = JSON.parse(message.data);
     if (event.type === "step") {
@@ -41,13 +46,24 @@ function follow(walkId) {
       addLine(event.stop, event.status === "ok" ? "Stop done" : `Stop ${event.status.replaceAll("_", " ")}`, "done");
     } else if (event.type === "report_ready") {
       events.close();
+      button.disabled = false;
       window.location.href = `/walks/${walkId}/report`;
     } else if (event.type === "error") {
       events.close();
+      button.disabled = false;
       statusBox.textContent = event.message;
     }
   };
-  events.onerror = () => events.close();
+  // The browser reconnects by itself and sends Last-Event-ID, so an error is not the end. It gives up (CLOSED)
+  // when the server no longer knows the walk, for example after a restart.
+  events.onerror = () => {
+    if (events.readyState === EventSource.CLOSED) {
+      button.disabled = false;
+      statusBox.textContent = "Lost track of this walk. Reload and upload the photos again.";
+    } else {
+      statusBox.textContent = "Connection dropped. Reconnecting…";
+    }
+  };
 }
 
 form.addEventListener("submit", async (submitEvent) => {
@@ -58,18 +74,20 @@ form.addEventListener("submit", async (submitEvent) => {
     showError("Pick 1 to 10 photos.");
     return;
   }
-  const button = form.querySelector("button");
+  button.disabled = true;
   button.textContent = "Uploading…";
   try {
     const response = await fetch("/walks", { method: "POST", body: new FormData(form) });
     const body = await response.json();
     if (!response.ok) {
-      showError(body.detail || "Upload failed. Try again.");
+      showError(typeof body.detail === "string" ? body.detail : "Upload failed. Try again.");
+      button.disabled = false;
       return;
     }
     follow(body.walk_id);
   } catch {
     showError("Couldn't reach the server. Try again.");
+    button.disabled = false;
   } finally {
     button.textContent = "Scout this field";
   }

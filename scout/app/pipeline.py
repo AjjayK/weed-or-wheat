@@ -55,7 +55,11 @@ class Pipeline:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "Pipeline":
-        return cls(Llm.from_settings(settings), SamClient.from_settings(settings), WeedBook.load(), load_records(),
+        records = load_records()
+        if not records:
+            log.warning("The label table is empty: every report will say no product matches. "
+                        "Build it with scout.labels.build_labels.")
+        return cls(Llm.from_settings(settings), SamClient.from_settings(settings), WeedBook.load(), records,
                    settings, Path(os.environ.get("SCOUT_STORE", "store")))
 
     def find_dir(self, walk_id: str) -> Path | None:
@@ -86,8 +90,12 @@ class Pipeline:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 with ThreadPoolExecutor(max_workers=self.settings.max_concurrent_stops) as pool:
                     stops = list(pool.map(lambda image: self._stop(walk, image, out_dir), images))
+                if all(stop.status == "failed" for stop in stops):  # an outage or a bad key: don't cache it
+                    raise RuntimeError("no stop could be analyzed")
                 report = build_report(walk.id, walk.crop, stops, self.weeds, self.records, self.llm)
-                (out_dir / "report.json").write_text(report.model_dump_json(indent=1), encoding="utf-8")
+                tmp = out_dir / "report.json.tmp"  # find_dir treats report.json as complete: write it atomically
+                tmp.write_text(report.model_dump_json(indent=1), encoding="utf-8")
+                os.replace(tmp, out_dir / "report.json")
             walk.report = report
             walk.emit({"type": "report_ready"})
             walk.status = "done"
