@@ -89,9 +89,9 @@ Rules run in code (`agronomy/rules.py`) on the field summary. Muse Spark explain
 - The most severe species outcome wins.
 - **Treat mode:** *spot* when the treated species appear at ≤ 1/3 of stops and mean weed cover < 5%; otherwise *broadcast*.
 
-**Urgency for treat:** compare the largest weed height against the smallest `max_weed_height_in` among the matching label options.
-- Height ≥ limit → "beyond label size limit" (options shown with that warning).
-- Height ≥ 75% of limit → "treat within ~3 days."
+**Urgency for treat:** compare the largest weed height against the `max_weed_height_in` limits of the matching label options. Only limits the weed is still within count (height ≤ limit, the same test that marks an option "over size limit"); the smallest of those is the limit used.
+- Taller than every label limit → "beyond label size limit" (options shown with that warning).
+- Height ≥ 75% of the limit used → "treat within ~3 days."
 - Otherwise → "treat within ~7 days."
 
 All threshold values are configurable in `weeds.yaml` and must cite a university extension source. The 50% and 75% factors and the 1/3 and 5% spot-mode cutoffs are named constants in `rules.py`.
@@ -296,7 +296,7 @@ Every box the agent sees or gives is `[x1, y1, x2, y2]` from 0 to 1000 on both a
 4. `lookup.find_label_options` keeps records where:
    - crop matches;
    - species matches;
-   - the crop stage is within `[crop_stage_min, crop_stage_max]` when the stage and both limits are known;
+   - the crop stage is not before `crop_stage_min` and not after `crop_stage_max`: each bound the label gives is checked, and a bound the label does not give (or that cannot be read as a stage) is not;
    - timing is `postemergence`.
 
    It does not drop records on weed size. A record whose `max_weed_height_in` is below the current weed height is still returned, marked "over size limit", and sorted last.

@@ -4343,10 +4343,10 @@ BOOK = WeedBook({
 })
 
 
-def _stop(i, species=None, cover=None, density=None, heights=None, status="ok", approximate=False):
+def _stop(i, species=None, cover=None, density=None, heights=None, status="ok", approximate=False, view="row"):
     species, cover = species or {}, cover or {}
     return StopResult(stop_index=i, image_hash=f"h{i}", species=species, species_cover_pct=cover,
-                      species_density=density, species_max_height_in=heights or {},
+                      species_density=density, species_max_height_in=heights or {}, view_type=view,
                       weed_cover_pct=sum(cover.values()), weed_count=sum(species.values()), status=status,
                       count_approximate=approximate)
 
@@ -4381,10 +4381,43 @@ def test_default_cover_threshold_gives_scout_again():
     assert "tool default" in d.rule_trace[0]
 
 
+def test_density_species_seen_only_where_density_unknown_is_graded_on_cover():
+    stops = [_stop(0, {"velvetleaf": 5}, {"velvetleaf": 30.0}), _stop(1, {"velvetleaf": 5}, {"velvetleaf": 30.0}),
+             _stop(2, density={}, view="top_down")]
+    d = decide(stops, BOOK)
+    assert d.summaries[0].mean_density_per_m2 == 0.0
+    assert d.summaries[0].outcome == "treat" and "% cover" in d.rule_trace[0]
+
+
+def test_close_up_counts_presence_but_not_cover():
+    stops = [_stop(0, {"giant_foxtail": 1}, {"giant_foxtail": 1.0}), _stop(1), _stop(2),
+             _stop(3, {"giant_foxtail": 1}, {"giant_foxtail": 60.0}, view="close_up")]
+    d = decide(stops, BOOK)
+    assert d.summaries[0].frequency == 0.5 and d.summaries[0].mean_cover_pct == 0.33
+    assert d.decision == "no_action"
+
+
+def test_spot_mode_counts_stops_with_any_treated_species():
+    top = {"view": "top_down"}
+    stops = [_stop(0, {"waterhemp": 1}, {"waterhemp": 0.5}), _stop(1, {"waterhemp": 1}, {"waterhemp": 0.5}),
+             _stop(2, {"velvetleaf": 4}, {"velvetleaf": 0.5}, density={"velvetleaf": 4.0}, **top),
+             _stop(3, {"velvetleaf": 4}, {"velvetleaf": 0.5}, density={"velvetleaf": 4.0}, **top),
+             _stop(4, density={}, **top), _stop(5, density={}, **top)]
+    d = decide(stops, BOOK)
+    assert [s.outcome for s in d.summaries] == ["treat", "treat"]
+    assert d.treat_mode == "broadcast"  # 4 of 6 stops hold a treated species, though each species is at 2 of 6
+
+
 def test_no_weeds_and_no_ok_stops():
     assert decide([_stop(0), _stop(1)], BOOK).decision == "no_action"
-    failed = decide([_stop(0, status="failed")], BOOK)
-    assert failed.decision == "no_action" and failed.rule_trace == ["No stop could be analyzed"]
+    failed = decide([_stop(0, status="failed"), _stop(1, status="no_crop_found")], BOOK)
+    assert failed.decision == "scout_again" and failed.summaries == []
+    assert failed.rule_trace == ["No stop could be analyzed -> scout again with new photos"]
+
+
+def test_partial_analysis_is_noted_in_trace():
+    d = decide([_stop(0, {"giant_foxtail": 1}, {"giant_foxtail": 1.0}), _stop(1, status="failed")], BOOK)
+    assert d.rule_trace[0] == "Based on 1 of 2 stops; the rest could not be analyzed"
 
 
 def _option(limit):
@@ -4395,10 +4428,16 @@ def _option(limit):
 
 
 def test_urgency_branches():
-    assert urgency(4.0, [_option(4.0)]).startswith("Beyond label size limit")
+    assert urgency(4.5, [_option(4.0)]).startswith("Beyond label size limit")
+    assert urgency(4.0, [_option(4.0)]).startswith("Treat within ~3 days")  # "up to 4 inches" includes 4
     assert urgency(3.0, [_option(4.0)]).startswith("Treat within ~3 days")
     assert urgency(1.0, [_option(4.0)]).startswith("Treat within ~7 days")
     assert urgency(None, [_option(4.0)]) is None and urgency(2.0, [_option(None)]) is None
+
+
+def test_urgency_ignores_limits_the_weed_already_exceeds():
+    assert urgency(4.0, [_option(2.0), _option(6.0)]).startswith("Treat within ~7 days")  # the 6-in label fits
+    assert urgency(7.0, [_option(2.0), _option(6.0)]) == "Beyond label size limit (7 in vs 6 in)"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -4439,9 +4478,10 @@ def _grade(value: float, limit: float) -> Outcome:
 
 
 def _species_outcome(info: WeedInfo, present: int, n_ok: int, mean_cover: float,
-                     mean_density: float | None, density_approx: bool = False) -> tuple[Outcome, str]:
-    """Grade density when it is known, else cover. When the count behind density is approximate (a mat of
-    plants segmented as one piece), cover is graded too and the more severe outcome wins."""
+                     mean_density: float | None, also_cover: bool = False) -> tuple[Outcome, str]:
+    """Grade density when it is known, else cover. With also_cover (the density sample missed this species, or
+    its count is approximate: a mat of plants segmented as one piece), cover is graded too and the more severe
+    outcome wins."""
     name = info.common_name
     if info.zero_tolerance and present:
         return "treat", f"{name}: zero tolerance; present at {present} of {n_ok} stops -> treat"
@@ -4452,7 +4492,7 @@ def _species_outcome(info: WeedInfo, present: int, n_ok: int, mean_cover: float,
     checks = [cover]
     if info.action_density is not None and mean_density is not None:
         density = (mean_density, info.action_density, "plants/m²", "sourced threshold")
-        checks = [density, cover] if density_approx else [density]
+        checks = [density, cover] if also_cover else [density]
     value, limit, unit, source = max(checks, key=lambda check: SEVERITY[_grade(check[0], check[1])])
     outcome = _grade(value, limit)
     return outcome, f"{name}: {value:g} {unit} vs threshold {limit:g} ({source}) -> {outcome.replace('_', ' ')}"
@@ -4461,18 +4501,23 @@ def _species_outcome(info: WeedInfo, present: int, n_ok: int, mean_cover: float,
 def decide(stops: list[StopResult], weeds: WeedBook) -> Decision:
     ok = [s for s in stops if s.status == "ok"]
     if not ok:
-        return Decision([], "no_action", None, ["No stop could be analyzed"])
+        return Decision([], "scout_again", None, ["No stop could be analyzed -> scout again with new photos"])
     n = len(ok)
-    top_down = [s for s in ok if s.species_density is not None]
+    measured = [s for s in ok if s.view_type != "close_up"] or ok  # a close-up shows one plant, not the field
+    top_down = [s for s in measured if s.species_density is not None]
     summaries, trace = [], []
+    if n < len(stops):
+        trace.append(f"Based on {n} of {len(stops)} stops; the rest could not be analyzed")
     for sid in sorted({sid for s in ok for sid in s.species}):
         present = sum(1 for s in ok if sid in s.species)
-        mean_cover = round(sum(s.species_cover_pct.get(sid, 0.0) for s in ok) / n, 2)
+        mean_cover = round(sum(s.species_cover_pct.get(sid, 0.0) for s in measured) / len(measured), 2)
         mean_density = (round(sum(s.species_density.get(sid, 0.0) for s in top_down) / len(top_down), 2)
                         if top_down else None)
         heights = [s.species_max_height_in[sid] for s in ok if sid in s.species_max_height_in]
-        approx = any(s.count_approximate and sid in s.species for s in top_down)
-        outcome, line = _species_outcome(weeds.get(sid), present, n, mean_cover, mean_density, approx)
+        # Cover is graded too when a stop that shows this species has no density measure or only an approximate
+        # count; the more severe outcome wins.
+        also_cover = any(sid in s.species and (s.species_density is None or s.count_approximate) for s in measured)
+        outcome, line = _species_outcome(weeds.get(sid), present, n, mean_cover, mean_density, also_cover)
         summaries.append(SpeciesSummary(species_id=sid, stops_present=present, frequency=round(present / n, 2),
                                         mean_cover_pct=mean_cover, mean_density_per_m2=mean_density,
                                         max_height_in=max(heights) if heights else None, outcome=outcome))
@@ -4482,10 +4527,11 @@ def decide(stops: list[StopResult], weeds: WeedBook) -> Decision:
     decision = max((s.outcome for s in summaries), key=SEVERITY.get, default="no_action")
     treat_mode = None
     if decision == "treat":
-        top_frequency = max(s.frequency for s in summaries if s.outcome == "treat")
-        field_cover = sum(s.weed_cover_pct for s in ok) / n
-        treat_mode = "spot" if top_frequency <= SPOT_MAX_FREQUENCY and field_cover < SPOT_MAX_COVER_PCT else "broadcast"
-        trace.append(f"Treat mode: {treat_mode} (treated species at {top_frequency:.0%} of stops, "
+        treated = {s.species_id for s in summaries if s.outcome == "treat"}
+        share = sum(1 for s in ok if treated & s.species.keys()) / n
+        field_cover = sum(s.weed_cover_pct for s in measured) / len(measured)
+        treat_mode = "spot" if share <= SPOT_MAX_FREQUENCY and field_cover < SPOT_MAX_COVER_PCT else "broadcast"
+        trace.append(f"Treat mode: {treat_mode} (treated species at {share:.0%} of stops, "
                      f"mean weed cover {field_cover:.1f}%)")
     return Decision(summaries, decision, treat_mode, trace)
 
@@ -4494,9 +4540,10 @@ def urgency(max_height_in: float | None, options: list[LabelOption]) -> str | No
     limits = [o.record.max_weed_height_in for o in options if o.record.max_weed_height_in is not None]
     if max_height_in is None or not limits:
         return None
-    limit = min(limits)
-    if max_height_in >= limit:
-        return f"Beyond label size limit ({max_height_in:g} in vs {limit:g} in)"
+    within = [limit for limit in limits if max_height_in <= limit]  # same test as LabelOption.over_size_limit
+    if not within:
+        return f"Beyond label size limit ({max_height_in:g} in vs {max(limits):g} in)"
+    limit = min(within)
     if max_height_in >= URGENT_HEIGHT_FACTOR * limit:
         return f"Treat within ~3 days ({max_height_in:g} in, label limit {limit:g} in)"
     return f"Treat within ~7 days ({max_height_in:g} in, label limit {limit:g} in)"
@@ -4505,7 +4552,7 @@ def urgency(max_height_in: float | None, options: list[LabelOption]) -> str | No
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_rules.py -v`
-Expected: 6 passed
+Expected: 11 passed
 
 - [ ] **Step 5: Commit**
 
@@ -4524,15 +4571,39 @@ git commit -m "feat: add field decision rules and urgency"
 
 `tests/test_epa.py`:
 ```python
-from scout.labels.epa import latest_pdf, parse_product
+import ssl
+
+import pytest
+
+from scout.labels.epa import download_pdf, epa_session, fetch_product, latest_pdf, parse_product
 
 ITEM = {
     "eparegno": "524-549", "productname": "RD 1617 HERBICIDE",
     "active_ingredients": [{"pc_code": "103613", "active_ing": "Glyphosate, potassium salt", "active_ing_percent": 48.7}],
-    "sites": [{"site": "CORN, FIELD"}], "pests": [{"pest": "KOCHIA"}], "types": [{"type": "HERBICIDE"}],
+    "sites": [{"site": "CORN, FIELD"}], "pests": [{"pest": "KOCHIA"}], "types": [{"type": "HERBICIDE TERRESTRIAL"}],
     "pdffiles": [{"pdffile": "000524-00549-20200225.pdf"}, {"pdffile": "000524-00549-20230406.pdf"},
                  {"pdffile": "odd-name.pdf"}],
 }
+
+
+class _Response:
+    def __init__(self, data=None, content=b""):
+        self._data, self.content = data, content
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._data
+
+
+class _Session:
+    def __init__(self, response):
+        self.response, self.urls = response, []
+
+    def get(self, url, timeout):
+        self.urls.append(url)
+        return self.response
 
 
 def test_parse_product():
@@ -4543,9 +4614,57 @@ def test_parse_product():
     assert facts.is_herbicide and facts.latest_pdf == "000524-00549-20230406.pdf"
 
 
+def test_is_herbicide_reads_ppls_types():
+    def facts(*types):
+        return parse_product({**ITEM, "types": [{"type": t} for t in types]})
+
+    assert facts().is_herbicide  # some herbicides list no type at all
+    assert not facts("FUNGICIDE", "INSECTICIDE").is_herbicide
+
+
 def test_latest_pdf_handles_missing_dates():
     assert latest_pdf([{"pdffile": "odd.pdf"}]) is None
     assert latest_pdf([]) is None
+    assert latest_pdf([{"pdffile": None}, {}]) is None
+    assert parse_product({**ITEM, "pdffiles": [{"pdffile": None}]}).latest_pdf is None
+
+
+def test_fetch_product_keeps_requested_number_when_ppls_lists_a_transfer(capsys):
+    transferred = {**ITEM, "eparegno": "105211-77"}
+    facts = fetch_product("524-549", _Session(_Response({"items": [transferred]})))
+    assert facts.reg_no == "524-549" and facts.latest_pdf == "000524-00549-20230406.pdf"
+    assert "105211-77" in capsys.readouterr().out
+
+
+def test_fetch_product_is_quiet_for_a_current_product_and_warns_for_a_cancelled_one(capsys):
+    assert fetch_product("524-549", _Session(_Response({"items": [ITEM]}))).reg_no == "524-549"
+    assert capsys.readouterr().out == ""
+    fetch_product("524-549", _Session(_Response({"items": [{**ITEM, "cancel_flag": "Yes"}]})))
+    assert "cancel" in capsys.readouterr().out.lower()
+
+
+def test_fetch_product_unknown_number():
+    with pytest.raises(LookupError):
+        fetch_product("1-1", _Session(_Response({"items": []})))
+
+
+def test_download_pdf_saves_pdfs_and_refuses_anything_else(tmp_path):
+    saved = download_pdf("a.pdf", tmp_path, _Session(_Response(content=b"%PDF-1.7 body")))
+    assert saved.read_bytes() == b"%PDF-1.7 body"
+    with pytest.raises(ValueError):
+        download_pdf("b.pdf", tmp_path, _Session(_Response(content=b"<html>Service unavailable</html>")))
+    assert not (tmp_path / "b.pdf").exists()
+    session = _Session(_Response(content=b"%PDF-new"))
+    assert download_pdf("a.pdf", tmp_path, session).read_bytes() == b"%PDF-1.7 body" and session.urls == []
+
+
+def test_epa_session_retries_and_still_verifies_certificates():
+    session = epa_session()
+    for host in ("https://ordspub.epa.gov/ords/x", "https://www3.epa.gov/pesticides/x"):
+        adapter = session.get_adapter(host)
+        assert adapter.max_retries.total == 3 and 503 in adapter.max_retries.status_forcelist
+        assert adapter.poolmanager.connection_pool_kw["ssl_context"].verify_mode == ssl.CERT_REQUIRED
+    assert session.verify is True
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -4560,11 +4679,12 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.labels.epa'`
 """EPA Pesticide Product Label System (PPLS): product facts and the latest label PDF."""
 import re
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 PPLS_URL = "https://ordspub.epa.gov/ords/pesticides/cswu/ppls/{reg_no}"
 PDF_BASE = "https://www3.epa.gov/pesticides/chem_search/ppls/"
@@ -4583,9 +4703,10 @@ class LegacyTLSAdapter(HTTPAdapter):
 
 
 def epa_session() -> requests.Session:
+    retry = Retry(total=3, backoff_factor=2, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",))
     session = requests.Session()
-    session.mount("https://ordspub.epa.gov", LegacyTLSAdapter())
-    session.mount("https://www3.epa.gov", LegacyTLSAdapter())
+    session.mount("https://ordspub.epa.gov", LegacyTLSAdapter(max_retries=retry))
+    session.mount("https://www3.epa.gov", LegacyTLSAdapter(max_retries=retry))
     return session
 
 
@@ -4601,11 +4722,12 @@ class ProductFacts:
 
     @property
     def is_herbicide(self) -> bool:
-        return "HERBICIDE" in self.types
+        """PPLS types read like 'HERBICIDE TERRESTRIAL', and some herbicides list no type at all."""
+        return not self.types or any("HERBICIDE" in t.upper() for t in self.types)
 
 
 def latest_pdf(pdffiles: list[dict]) -> str | None:
-    dated = [(m.group(1), f["pdffile"]) for f in pdffiles if (m := _PDF_DATE.search(f.get("pdffile", "")))]
+    dated = [(m.group(1), f["pdffile"]) for f in pdffiles if (m := _PDF_DATE.search(f.get("pdffile") or ""))]
     return max(dated)[1] if dated else None
 
 
@@ -4627,7 +4749,13 @@ def fetch_product(reg_no: str, session: requests.Session) -> ProductFacts:
     items = response.json().get("items") or []
     if not items:
         raise LookupError(f"EPA has no product {reg_no}")
-    return parse_product(items[0])
+    facts = parse_product(items[0])
+    if facts.reg_no != reg_no:
+        print(f"{reg_no}: PPLS now lists this product as {facts.reg_no}; keeping {reg_no}, whose label PDFs these are")
+        facts = replace(facts, reg_no=reg_no)
+    if items[0].get("cancel_flag") == "Yes":
+        print(f"{reg_no}: warning, EPA lists this product as cancelled")
+    return facts
 
 
 def download_pdf(filename: str, dest_dir: Path, session: requests.Session) -> Path:
@@ -4635,6 +4763,8 @@ def download_pdf(filename: str, dest_dir: Path, session: requests.Session) -> Pa
     if not path.exists():
         response = session.get(PDF_BASE + filename, timeout=120)
         response.raise_for_status()
+        if not response.content.startswith(b"%PDF"):
+            raise ValueError(f"{filename} is not a PDF (an error page, perhaps)")
         path.write_bytes(response.content)
     return path
 ```
@@ -4642,7 +4772,7 @@ def download_pdf(filename: str, dest_dir: Path, session: requests.Session) -> Pa
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_epa.py -v`
-Expected: 2 passed
+Expected: 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -4662,6 +4792,7 @@ git commit -m "feat: add EPA PPLS client"
 `tests/test_extract.py`:
 ```python
 import json
+from dataclasses import replace
 
 from scout.agent.llm import LlmTurn
 from scout.labels.epa import ProductFacts
@@ -4669,8 +4800,9 @@ from scout.labels.extract import USE_RECORDS_FORMAT, extract_use_records, verify
 from scout.models import UseRecord
 from tests.helpers import FakeLlm, small_weedbook
 
-FACTS = ProductFacts(reg_no="100-1", product_name="Test Herbicide", active_ingredients=["fomesafen"], sites=[],
-                     pests=[], types=["HERBICIDE"], latest_pdf="000100-00001-20240101.pdf")
+FACTS = ProductFacts(reg_no="100-1", product_name="Test Herbicide", active_ingredients=["fomesafen"],
+                     sites=["SOYBEANS (FOLIAR TREATMENT)"], pests=[], types=["HERBICIDE TERRESTRIAL"],
+                     latest_pdf="000100-00001-20240101.pdf")
 
 
 def _item(**over):
@@ -4695,6 +4827,42 @@ def test_extract_maps_species_and_fills_product_facts(tmp_path):
     assert request["input"][0]["content"][1]["type"] == "input_file"
 
 
+def _prompt(llm, n):
+    return llm.requests[n]["input"][0]["content"][0]["text"]
+
+
+def test_extract_asks_once_per_labeled_crop_and_keeps_only_that_crop(tmp_path):
+    pdf = tmp_path / "label.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    facts = replace(FACTS, sites=["CORN (FIELD) (FOLIAR TREATMENT)", "SOYBEANS (FOLIAR TREATMENT)"])
+    llm = FakeLlm([LlmTurn("r1", [], json.dumps({"records": [_item(crop="corn"), _item(crop="soybean")]})),
+                   LlmTurn("r2", [], json.dumps({"records": [_item(species_id="Marestail")]}))])
+    records = extract_use_records(pdf, facts, llm, small_weedbook())
+    assert len(llm.requests) == 2
+    assert "on corn only" in _prompt(llm, 0) and "on soybean only" in _prompt(llm, 1)
+    assert [(r.crop, r.species_id) for r in records] == [("corn", "waterhemp"), ("soybean", "horseweed")]
+
+
+def test_extract_crops_default_to_all_three_and_skip_unlabeled_ones(tmp_path):
+    pdf = tmp_path / "label.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    empty = json.dumps({"records": []})
+    llm = FakeLlm([LlmTurn(f"r{n}", [], empty) for n in range(3)])
+    extract_use_records(pdf, replace(FACTS, sites=[]), llm, small_weedbook())
+    assert len(llm.requests) == 3
+    llm = FakeLlm([])
+    assert extract_use_records(pdf, replace(FACTS, sites=["WHEAT"]), llm, small_weedbook()) == []
+    assert llm.requests == []
+
+
+def test_extract_reduces_herbicide_groups_to_digits(tmp_path):
+    pdf = tmp_path / "label.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    item = _item(herbicide_groups=["Group 15", "Group 27 (HPPD)", "27"])
+    llm = FakeLlm([LlmTurn("r1", [], json.dumps({"records": [item]}))])
+    assert extract_use_records(pdf, FACTS, llm, small_weedbook())[0].herbicide_groups == ["15", "27"]
+
+
 def _record(page, quote):
     return UseRecord(reg_no="1", product_name="P", active_ingredients=[], herbicide_groups=[], crop="soybean",
                      species_id="waterhemp", weed_label_text="w", timing="postemergence", page=page, quote=quote)
@@ -4707,6 +4875,31 @@ def test_verify_keeps_found_quotes_and_fixes_adjacent_page():
                             _record(1, "never printed anywhere on label")], texts)
     assert [r.page for r in kept] == [2, 2]
     assert len(dropped) == 1
+
+
+PAGE3 = ("Page 1 \nuse after a mesotrione-\ncontaining herbicide.  Tank mix with Dual II Ma gnum® \n"
+         "If dry, apply ½ to 1 inch of water.  Do not exceed 3.0 fl oz per acre.")
+
+
+def test_verify_survives_pdf_text_artifacts_and_printed_page_numbers():
+    texts = ["EPA acceptance letter", "letter page 2", PAGE3]
+    quotes = ["use after a mesotrione-containing herbicide", "Tank mix with Dual II Magnum®",
+              "apply 1/2 to 1 inch of water", "Do not exceed 3.0 fl oz per acre"]
+    kept, dropped = verify([_record(1, q) for q in quotes], texts)  # cited by the printed "Page 1"
+    assert dropped == [] and [r.page for r in kept] == [3, 3, 3, 3]
+
+
+def test_verify_rejects_changed_words_and_numbers():
+    texts = ["EPA acceptance letter", "letter page 2", PAGE3]
+    kept, _ = verify([_record(3, "Do not exceed 30 fl oz per acre"), _record(3, "apply 12 to 1 inch of water"),
+                      _record(3, "Tank mix with Dual Magnum"), _record(3, "Do exceed 3.0 fl oz per acre")], texts)
+    assert kept == []
+
+
+def test_verify_picks_the_nearest_page_when_a_quote_repeats():
+    texts = ["Do not apply more than twice"] + ["other"] * 3 + ["Do not apply more than twice"]
+    kept, _ = verify([_record(4, "Do not apply more than twice")], texts)
+    assert kept[0].page == 5
 
 
 def test_verify_drops_short_quotes():
@@ -4727,6 +4920,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.labels.extract'
 import base64
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -4737,7 +4931,8 @@ from scout.agronomy.weeds import WeedBook
 from scout.labels.epa import ProductFacts
 from scout.models import UseRecord
 
-MIN_QUOTE_CHARS = 15
+MIN_QUOTE_KEY_CHARS = 12  # letters and digits left in a quote after _key
+SITE_WORD = {"corn": "CORN", "soybean": "SOYBEAN", "alfalfa": "ALFALFA"}  # as PPLS sites name the crops
 
 
 def _nullable(kind: str) -> dict:
@@ -4776,14 +4971,15 @@ USE_RECORDS_FORMAT = {
 }
 
 EXTRACT_PROMPT = """You are reading the EPA-registered label for {product} (EPA Reg. No. {reg_no}).
-Extract one record per (crop, weed, timing) for these crops only: corn (field corn), soybean, alfalfa.
+Extract one record per weed for in-crop postemergence uses on {crop} only (for corn: field corn).
 species_id must be one of these ids; map label weed names to them and skip weeds that do not map:
 {species}
 For each record give: the maximum weed height in inches the label allows (null if none); crop stage limits such as \
 V2 or V8 (null if none); the rate range and unit as printed; the pre-harvest interval in days; the restricted-entry \
 interval in hours; the herbicide group number(s) printed on the label.
 page is the 1-based page index within this PDF file where the record's facts appear. quote is a verbatim snippet \
-of 15 to 200 characters copied from that page that supports the record.
+of 15 to 200 characters copied from that page that supports the record. Copy the quote character for character \
+from one place on the page: no paraphrase, no ellipses.
 Return only records the label clearly supports."""
 
 
@@ -4795,29 +4991,29 @@ def page_texts(path: Path) -> list[str]:
     return [page.extract_text() or "" for page in PdfReader(str(path)).pages]
 
 
-def _norm(text: str) -> str:
-    text = text.lower()
-    for old, new in (("’", "'"), ("‘", "'"), ("“", '"'), ("”", '"'), ("–", "-"), ("—", "-")):
-        text = text.replace(old, new)
-    return re.sub(r"\s+", " ", text).strip()
+def _key(text: str) -> str:
+    """Letters and digits only, so pypdf noise (line breaks, hyphenation, kerning spaces, ®, quote styles,
+    ligatures) cannot break a match. Separators between digits survive, so 1.5, 15, 1/2 and 7-10 stay distinct."""
+    # NFKC writes ½ as 1, the fraction slash U+2044, 2; the slash is made plain here
+    text = unicodedata.normalize("NFKC", text).replace("⁄", "/").lower()
+    text = re.sub(r"(?<=\d)\s*([./])\s*(?=\d)", r"\1", text)
+    text = re.sub(r"(?<=\d)[^a-z0-9./]+(?=\d)", "_", text)
+    return re.sub(r"[^a-z0-9./_]+|(?<!\d)[./]|[./](?!\d)", "", text)
 
 
 def verify(records: list[UseRecord], texts: list[str]) -> tuple[list[UseRecord], list[UseRecord]]:
-    """Keep a record only if its quote appears on its page (or the page next to it, which then becomes its page)."""
-    normed = [_norm(t) for t in texts]
+    """Keep a record only if its quote is on some page of the PDF. Its page becomes the nearest page holding the
+    quote: models often cite the printed page number, and EPA PDFs open with a 1-3 page acceptance letter."""
+    pages = [_key(t) for t in texts]
     kept, dropped = [], []
     for record in records:
-        quote = _norm(record.quote)
-        found = None
-        if len(quote) >= MIN_QUOTE_CHARS:
-            for page in (record.page, record.page - 1, record.page + 1):
-                if 1 <= page <= len(normed) and quote in normed[page - 1]:
-                    found = page
-                    break
-        if found is None:
-            dropped.append(record)
+        quote = _key(record.quote)
+        hits = ([n for n, page in enumerate(pages, start=1) if quote in page]
+                if len(quote) >= MIN_QUOTE_KEY_CHARS else [])
+        if hits:
+            kept.append(record.model_copy(update={"page": min(hits, key=lambda n: abs(n - record.page))}))
         else:
-            kept.append(record.model_copy(update={"page": found}))
+            dropped.append(record)
     return kept, dropped
 
 
@@ -4825,27 +5021,30 @@ def extract_use_records(pdf_path: Path, facts: ProductFacts, llm, weeds: WeedBoo
     species = [sid for sid in weeds.ids() if not sid.startswith("unidentified")]
     listing = "\n".join(f"- {sid}: {', '.join([weeds.get(sid).common_name, *weeds.get(sid).synonyms])}"
                         for sid in species)
-    prompt = EXTRACT_PROMPT.format(product=facts.product_name, reg_no=facts.reg_no, species=listing)
-    turn = llm.turn([user_message(prompt, file=(Path(pdf_path).name, pdf_data_url(pdf_path)))],
-                    text_format=USE_RECORDS_FORMAT)
+    file = (Path(pdf_path).name, pdf_data_url(pdf_path))
+    crops = [crop for crop, word in SITE_WORD.items() if not facts.sites or any(word in s.upper() for s in facts.sites)]
     records = []
-    for item in json.loads(turn.text)["records"]:
-        sid = item["species_id"] if item["species_id"] in weeds else weeds.resolve(item["species_id"])
-        if sid is None or sid.startswith("unidentified"):
-            continue
-        try:
-            records.append(UseRecord(reg_no=facts.reg_no, product_name=facts.product_name,
-                                     active_ingredients=facts.active_ingredients, pdf_file=facts.latest_pdf,
-                                     **{**item, "species_id": sid}))
-        except ValidationError:
-            continue
+    for crop in crops:  # one smaller answer per crop: a single answer for a glyphosate label can run past the timeout
+        prompt = EXTRACT_PROMPT.format(product=facts.product_name, reg_no=facts.reg_no, species=listing, crop=crop)
+        turn = llm.turn([user_message(prompt, file=file)], text_format=USE_RECORDS_FORMAT)
+        for item in json.loads(turn.text)["records"]:
+            sid = item["species_id"] if item["species_id"] in weeds else weeds.resolve(item["species_id"])
+            if sid is None or sid.startswith("unidentified") or item.get("crop") != crop:
+                continue
+            groups = sorted({d for g in item["herbicide_groups"] for d in re.findall(r"\d+", g)})
+            try:
+                records.append(UseRecord(reg_no=facts.reg_no, product_name=facts.product_name,
+                                         active_ingredients=facts.active_ingredients, pdf_file=facts.latest_pdf,
+                                         **{**item, "species_id": sid, "herbicide_groups": groups}))
+            except ValidationError:
+                continue
     return records
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_extract.py -v`
-Expected: 3 passed
+Expected: 9 passed
 
 - [ ] **Step 5: Commit**
 
@@ -4905,6 +5104,7 @@ def main() -> None:
         reg_nos = [r for r in reg_nos if r in args.only]
     records = [r for r in existing if r["reg_no"] not in reg_nos]
     for reg_no in reg_nos:
+        previous = [r for r in existing if r["reg_no"] == reg_no]
         try:
             facts = fetch_product(reg_no, session)
             if not facts.is_herbicide or not facts.latest_pdf:
@@ -4914,8 +5114,9 @@ def main() -> None:
             kept, dropped = verify(extract_use_records(pdf, facts, llm, weeds), page_texts(pdf))
             records += [r.model_dump() for r in kept]
             print(f"{reg_no} {facts.product_name}: kept {len(kept)}, dropped {len(dropped)}")
-        except Exception as error:  # one bad product must not stop the batch
-            print(f"{reg_no}: failed ({error})")
+        except Exception as error:  # one bad product must not stop the batch, nor cost it its earlier records
+            records += previous
+            print(f"{reg_no}: failed ({error}); kept {len(previous)} earlier records")
     out_path.write_text(json.dumps(records, indent=1), encoding="utf-8")
     print(f"Wrote {len(records)} records to {out_path}")
 
@@ -4926,8 +5127,8 @@ if __name__ == "__main__":
 
 - [ ] **Step 3: Try two products first**
 
-Run: `python -m scout.labels.build_labels --only <first reg_no> <second reg_no>`
-Expected: two lines with kept/dropped counts. If almost everything is dropped, compare a dropped quote against `page_texts`. If quotes are paraphrased, add "copy characters exactly; do not paraphrase" to `EXTRACT_PROMPT` and rerun.
+Run: `python -m scout.labels.build_labels --only <first reg_no> <second reg_no>` (make one of the two a glyphosate label: it is the longest kind of label, so it shows whether the per-crop calls finish in time)
+Expected: two lines with kept/dropped counts. If almost everything is dropped, compare a dropped quote against `page_texts`. If quotes are paraphrased, tighten the quote rule in `EXTRACT_PROMPT` and rerun.
 
 - [ ] **Step 4: Run all products**
 
@@ -4959,10 +5160,11 @@ from scout.labels.lookup import find_label_options, load_records, stage_index
 from scout.models import UseRecord
 
 
-def _r(reg, groups, limit=None, stage_max=None, species="waterhemp", crop="soybean", timing="postemergence"):
+def _r(reg, groups, limit=None, stage_min=None, stage_max=None, species="waterhemp", crop="soybean",
+       timing="postemergence"):
     return UseRecord(reg_no=reg, product_name=f"P{reg}", active_ingredients=[], herbicide_groups=groups, crop=crop,
                      species_id=species, weed_label_text=species, timing=timing, max_weed_height_in=limit,
-                     crop_stage_min="VE" if stage_max else None, crop_stage_max=stage_max, page=1, quote="q")
+                     crop_stage_min=stage_min, crop_stage_max=stage_max, page=1, quote="q")
 
 
 def test_stage_index_orders_stages():
@@ -4970,11 +5172,28 @@ def test_stage_index_orders_stages():
     assert stage_index("bloom") is None and stage_index(None) is None
 
 
+def test_stage_index_reads_label_wording():
+    assert stage_index("V4-V5") == stage_index("V5") and stage_index("up to V8") == stage_index("V8")
+    assert stage_index("8-leaf") == stage_index("V8") and stage_index("V 4") == stage_index("V4")
+    assert stage_index("R1 (beginning bloom)") == stage_index("R1")
+    assert stage_index("30 inches") is None and stage_index("very early") is None
+
+
 def test_filters_crop_species_timing_and_stage():
     records = [_r("1", ["14"], 4), _r("2", ["14"], crop="corn"), _r("3", ["15"], timing="preemergence"),
-               _r("4", ["10"], stage_max="V2"), _r("5", ["9"], species="velvetleaf")]
+               _r("4", ["10"], stage_min="VE", stage_max="V2"), _r("5", ["9"], species="velvetleaf")]
     options = find_label_options(records, "soybean", "waterhemp", 2.0, "V3")
     assert [o.record.reg_no for o in options] == ["1"]
+
+
+def test_stage_filter_checks_each_bound_the_label_gives():
+    records = [_r("max", ["14"], stage_max="V8"), _r("min", ["10"], stage_min="V3"), _r("none", ["9"])]
+
+    def reg_nos(stage):
+        return sorted(o.record.reg_no for o in find_label_options(records, "soybean", "waterhemp", None, stage))
+
+    assert reg_nos("V10") == ["min", "none"] and reg_nos("V2") == ["max", "none"]
+    assert reg_nos("V6") == ["max", "min", "none"] and reg_nos(None) == ["max", "min", "none"]
 
 
 def test_over_size_kept_last_and_groups_diversified():
@@ -5000,19 +5219,27 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.labels.lookup'`
 ```python
 """Find label-backed options for one species on one crop. A filter over a table, not search over text."""
 import json
+import re
 from pathlib import Path
 
 from scout.models import LabelOption, UseRecord
 
 DEFAULT_PATH = Path(__file__).with_name("use_records.json")
 STAGES = ["VE", "VC"] + [f"V{n}" for n in range(1, 21)] + ["VT"] + [f"R{n}" for n in range(1, 9)]
+_STAGE = re.compile(r"(?<![A-Z])(VE|VC|VT|[VR] ?\d{1,2})(?![A-Z\d])")
+_LEAF = re.compile(r"(\d{1,2}) ?-? ?LEAF")
 
 
 def stage_index(stage: str | None) -> int | None:
+    """Index in STAGES. Reads 'V4-V5' as V5 (the later stage), 'up to V8' as V8 and '8-leaf' as V8."""
     if not stage:
         return None
-    key = stage.strip().upper().replace(" ", "")
-    return STAGES.index(key) if key in STAGES else None
+    text = stage.upper()
+    found = [STAGES.index(s.replace(" ", "")) for s in _STAGE.findall(text) if s.replace(" ", "") in STAGES]
+    if found:
+        return max(found)
+    leaf = _LEAF.search(text)
+    return STAGES.index(f"V{leaf.group(1)}") if leaf and f"V{leaf.group(1)}" in STAGES else None
 
 
 def load_records(path: Path = DEFAULT_PATH) -> list[UseRecord]:
@@ -5030,7 +5257,7 @@ def find_label_options(records: list[UseRecord], crop: str, species_id: str, wee
         if record.crop != crop or record.species_id != species_id or record.timing != "postemergence":
             continue
         low, high = stage_index(record.crop_stage_min), stage_index(record.crop_stage_max)
-        if stage is not None and low is not None and high is not None and not low <= stage <= high:
+        if stage is not None and ((low is not None and stage < low) or (high is not None and stage > high)):
             continue
         over = (weed_height_in is not None and record.max_weed_height_in is not None
                 and record.max_weed_height_in < weed_height_in)
@@ -5053,7 +5280,7 @@ def find_label_options(records: list[UseRecord], crop: str, species_id: str, wee
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_lookup.py -v`
-Expected: 4 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Commit**
 
