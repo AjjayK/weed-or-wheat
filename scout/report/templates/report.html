@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scouting report: {{ report.crop }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #fafaf7; color: #1f1f1c; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .card { background: #fff; border: 1px solid #e3e1d9; border-radius: 10px; padding: 12px; }
+  .card b { display: block; font-size: 22px; font-weight: 600; }
+  .treat { background: #faeeda; } .scout_again { background: #e6f1fb; } .no_action { background: #eaf3de; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { border-bottom: 1px solid #e3e1d9; padding: 6px; text-align: left; vertical-align: top; }
+  .stops { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .stops img { width: 100%; border-radius: 8px; }
+  .flag { color: #a32d2d; font-size: 13px; }
+  .muted { color: #6b6a63; font-size: 13px; }
+  .table-wrap { overflow-x: auto; }
+  @media print { .noprint { display: none; } }
+</style>
+</head>
+<body>
+<main>
+<p class="noprint"><a href="/">New walk</a> · <a href="stops.csv">Download CSV</a> · <a href="#" onclick="window.print(); return false;">Save as PDF</a></p>
+<h1>Scouting report: {{ report.crop }}, {{ report.stops|length }} stops</h1>
+<div class="cards">
+  <div class="card">Mean weed cover<b>{{ "%.1f"|format(mean_cover) }}%</b></div>
+  <div class="card">Density<b>{{ density_text }}</b></div>
+  <div class="card">Stops with weeds<b>{{ stops_with_weeds }} of {{ ok_count }}</b></div>
+  <div class="card {{ report.decision }}">Decision<b>{{ decision_text }}</b>{% if report.urgency %}<span class="muted">{{ report.urgency }}</span>{% endif %}</div>
+</div>
+
+<h2>Why</h2>
+<p>{{ report.explanation }}</p>
+<details><summary>Rule trace</summary><ul>{% for line in report.rule_trace %}<li>{{ line }}</li>{% endfor %}</ul></details>
+
+<h2>Weeds found</h2>
+{% if report.species_summary %}
+<div class="table-wrap"><table>
+  <tr><th>Species</th><th>Stops</th><th>Mean cover</th><th>Density</th><th>Max height</th><th>Outcome</th></tr>
+  {% for s in report.species_summary %}
+  <tr>
+    <td>{{ names[s.species_id] }}</td><td>{{ s.stops_present }}</td><td>{{ s.mean_cover_pct }}%</td>
+    <td>{{ s.mean_density_per_m2 if s.mean_density_per_m2 is not none else "—" }}</td>
+    <td>{{ (s.max_height_in|string + " in") if s.max_height_in is not none else "—" }}</td>
+    <td>{{ outcome_text[s.outcome] }}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}<p>No weeds found.</p>{% endif %}
+
+<h2>Label-backed options</h2>
+{% if report.options %}
+<div class="table-wrap"><table>
+  <tr><th>Product (EPA reg. no.)</th><th>Group</th><th>Limits</th><th>Rate</th><th>Pre-harvest interval</th><th>Source</th></tr>
+  {% for o in report.options %}{% set r = o.record %}
+  <tr>
+    <td>{{ r.product_name }} ({{ r.reg_no }})</td>
+    <td>{{ r.herbicide_groups|join(", ") }}</td>
+    <td>{% if r.max_weed_height_in is not none %}Weeds up to {{ r.max_weed_height_in }} in{% endif %}{% if r.crop_stage_max %} · crop up to {{ r.crop_stage_max }}{% endif %}{% if o.over_size_limit %}<div class="flag">Weeds are over this size limit</div>{% endif %}</td>
+    <td>{% if r.rate_min is not none %}{{ r.rate_min }}{% if r.rate_max is not none and r.rate_max != r.rate_min %}–{{ r.rate_max }}{% endif %} {{ r.rate_unit or "" }}{% else %}—{% endif %}</td>
+    <td>{{ (r.phi_days|string + " days") if r.phi_days is not none else "—" }}</td>
+    <td>{% if r.pdf_file %}<a href="https://www3.epa.gov/pesticides/chem_search/ppls/{{ r.pdf_file }}#page={{ r.page }}">p. {{ r.page }}</a>{% else %}p. {{ r.page }}{% endif %}<div class="muted">“{{ r.quote }}”</div></td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}<p>No product in the current label set matches.</p>{% endif %}
+<p class="muted">Read the label before use. The label is the law. This report is decision support, not a prescription.</p>
+
+{% set pins = report.stops | selectattr("gps") | list %}
+{% if pins %}
+<h2>Stops on the map</h2>
+<div id="map" style="height: 280px; border-radius: 10px;"></div>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  const pins = {{ pins | map(attribute="gps") | list | tojson }};
+  const labels = {{ pins | map(attribute="stop_index") | list | tojson }};
+  const map = L.map("map");
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+  pins.forEach((p, i) => L.marker(p).addTo(map).bindPopup(`Stop ${labels[i] + 1}`));
+  map.fitBounds(pins, { padding: [30, 30], maxZoom: 18 });
+</script>
+{% endif %}
+
+<h2>Stops</h2>
+<p>Green: crop · Magenta: weeds · Gray: in-row zone · Yellow box: check this plant</p>
+<div class="stops">
+{% for s in report.stops %}
+  <div class="card">
+    <img src="{{ overlay_url(s.stop_index) }}" alt="Stop {{ s.stop_index + 1 }}: crop in green, weeds in magenta">
+    <b>Stop {{ s.stop_index + 1 }}</b>
+    <span class="muted">{{ s.view_type.replace("_", " ") }}{% if s.crop_stage %} · crop {{ s.crop_stage }}{% endif %} · {{ s.status.replace("_", " ") }}</span>
+    <p>Weed cover {{ s.weed_cover_pct }}% · {{ s.weed_count }} weeds{% if s.count_approximate %} (approx.){% endif %}{% if s.density_per_m2 is not none %} · {{ s.density_per_m2 }}/m²{% endif %}</p>
+    {% for f in s.flags %}<div class="flag">{{ f }}</div>{% endfor %}
+  </div>
+{% endfor %}
+</div>
+</main>
+</body>
+</html>
