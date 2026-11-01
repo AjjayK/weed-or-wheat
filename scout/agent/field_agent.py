@@ -65,7 +65,8 @@ def build_report(walk_id: str, crop: str, stops: list[StopResult], weeds: WeedBo
         "crop": crop, "decision": d.decision, "treat_mode": d.treat_mode, "urgency": urgency_text,
         "species": [s.model_dump() for s in d.summaries], "rule_trace": d.rule_trace,
         "options": [{"product": o.record.product_name, "groups": o.record.herbicide_groups,
-                     "max_weed_height_in": o.record.max_weed_height_in, "over_size_limit": o.over_size_limit}
+                     "max_weed_height_in": o.record.max_weed_height_in, "over_size_limit": o.over_size_limit,
+                     "requires_trait": o.record.requires_trait}
                     for o in options],
     }, ensure_ascii=False)
     explanation = None

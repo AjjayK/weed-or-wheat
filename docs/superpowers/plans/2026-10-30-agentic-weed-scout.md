@@ -411,6 +411,7 @@ class UseRecord(BaseModel):
     page: int
     quote: str
     pdf_file: str | None = None
+    requires_trait: str | None = None  # seed trait the crop must carry (e.g. glyphosate-tolerant); from focus_products.csv
 
 
 class LabelOption(BaseModel):
@@ -4057,8 +4058,8 @@ tool calls. Always respond with tool calls, not prose. Every coordinate is 0 to 
 FIELD_INSTRUCTIONS = """You are an agronomist writing the reasoning for a field scouting report. You receive JSON \
 with the species summary, the rule trace that produced the decision, and label-backed product options. Write at \
 most 120 words for a farmer: what was found, why the decision follows, and what to weigh among the options (for \
-example rotating herbicide groups). Use only numbers that appear in the JSON. Do not recommend a rate. Plain text only, no \
-Markdown. End with: "Read the label before use." """
+example rotating herbicide groups, or the seed trait a product requires). Use only numbers that appear in the \
+JSON. Do not recommend a rate. Plain text only, no Markdown. End with: "Read the label before use." """
 ```
 
 - [ ] **Step 4: Write the stop agent**
@@ -4862,6 +4863,15 @@ def test_extract_crops_default_to_all_three_and_skip_unlabeled_ones(tmp_path):
     assert llm.requests == []
 
 
+def test_extract_matches_crop_sites_as_whole_words(tmp_path):
+    pdf = tmp_path / "label.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    llm = FakeLlm([LlmTurn("r1", [], json.dumps({"records": []}))])
+    extract_use_records(pdf, replace(FACTS, sites=["ACORN SQUASH", "CORN SALAD", "SOYBEANS (FOLIAR TREATMENT)"]),
+                        llm, small_weedbook())
+    assert len(llm.requests) == 1 and "on soybean only" in _prompt(llm, 0)
+
+
 def test_extract_reduces_herbicide_groups_to_digits(tmp_path):
     pdf = tmp_path / "label.pdf"
     pdf.write_bytes(b"%PDF-1.4 test")
@@ -4939,7 +4949,9 @@ from scout.labels.epa import ProductFacts
 from scout.models import UseRecord
 
 MIN_QUOTE_KEY_CHARS = 12  # letters and digits left in a quote after _key
-SITE_WORD = {"corn": "CORN", "soybean": "SOYBEAN", "alfalfa": "ALFALFA"}  # as PPLS sites name the crops
+SITE_PATTERN = {  # as PPLS sites name the crops; whole words, so ACORN SQUASH and CORN SALAD are not corn
+    "corn": re.compile(r"\bCORN\b(?! SALAD)"), "soybean": re.compile(r"\bSOYBEANS?\b"),
+    "alfalfa": re.compile(r"\bALFALFA\b")}
 
 
 def _nullable(kind: str) -> dict:
@@ -4978,9 +4990,11 @@ USE_RECORDS_FORMAT = {
 }
 
 EXTRACT_PROMPT = """You are reading the EPA-registered label for {product} (EPA Reg. No. {reg_no}).
-Extract one record per weed for in-crop postemergence uses on {crop} only (for corn: field corn).
+Extract one record per weed for in-crop postemergence uses on {crop} only (for corn: field corn). When the {crop} \
+directions refer to a table of weeds controlled elsewhere in the label, take the weeds from that table.
 species_id must be one of these ids; map label weed names to them and skip weeds that do not map:
 {species}
+Skip weeds the label rates only as partially controlled or suppressed by this product used alone.
 For each record give: the maximum weed height in inches the label allows (null if none); crop stage limits such as \
 V2 or V8 (null if none); the rate range and unit as printed; the pre-harvest interval in days; the restricted-entry \
 interval in hours; the herbicide group number(s) printed on the label.
@@ -5029,7 +5043,8 @@ def extract_use_records(pdf_path: Path, facts: ProductFacts, llm, weeds: WeedBoo
     listing = "\n".join(f"- {sid}: {', '.join([weeds.get(sid).common_name, *weeds.get(sid).synonyms])}"
                         for sid in species)
     file = (Path(pdf_path).name, pdf_data_url(pdf_path))
-    crops = [crop for crop, word in SITE_WORD.items() if not facts.sites or any(word in s.upper() for s in facts.sites)]
+    crops = [crop for crop, pattern in SITE_PATTERN.items()
+             if not facts.sites or any(pattern.search(s.upper()) for s in facts.sites)]
     records = []
     for crop in crops:  # one smaller answer per crop: a single answer for a glyphosate label can run past the timeout
         prompt = EXTRACT_PROMPT.format(product=facts.product_name, reg_no=facts.reg_no, species=listing, crop=crop)
@@ -5051,7 +5066,7 @@ def extract_use_records(pdf_path: Path, facts: ProductFacts, llm, weeds: WeedBoo
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_extract.py -v`
-Expected: 9 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Commit**
 
@@ -5064,17 +5079,45 @@ git commit -m "feat: extract label use records and verify quotes"
 
 **Files:**
 - Create: `scout/labels/focus_products.csv`, `scout/labels/build_labels.py`, `scout/labels/use_records.json` (generated)
+- Test: `tests/test_build_labels.py`
 
 - [ ] **Step 1: [USER] Pick the products**
 
 Create `scout/labels/focus_products.csv` with about 20 postemergence herbicides labeled for corn, soybean, or alfalfa. Prefer products that cover the weeds in your demo walks, and span several herbicide groups (for example 2, 4, 5, 9, 10, 14, 15, 27). Header and one row per product:
 ```
-reg_no,note
-524-549,glyphosate (example row; replace with your picks)
+reg_no,brand,trait_corn,trait_soybean,trait_alfalfa,note
+524-659,Roundup PowerMAX 3,glyphosate-tolerant,glyphosate-tolerant,glyphosate-tolerant,glyphosate (example row; replace with your picks)
+100-1131,,,,,mesotrione (example row: no trait needed)
 ```
+Fill `brand` only when PPLS gives the product a name farmers would not recognize (a master label's code name, such as MON 301108 Herbicide); use one of the alternate brand names PPLS lists for that registration number. Fill a crop's trait column only when the product can be sprayed over that crop only if the seed carries a tolerance trait (for example glyphosate-tolerant, glufosinate-tolerant, Enlist, dicamba-tolerant, Clearfield). The report then shows "Requires <trait> seed" under the product, and the explanation can mention it.
 Look up registration numbers at https://ordspub.epa.gov/ords/pesticides/f?p=PPLS:1 or on the product labels you know.
 
 - [ ] **Step 2: Write the CLI**
+
+`tests/test_build_labels.py`:
+```python
+from scout.labels.build_labels import read_products, with_traits
+
+
+def test_read_products_keeps_file_order_and_drops_blank_cells(tmp_path):
+    path = tmp_path / "focus.csv"
+    path.write_text("reg_no,brand,trait_corn,trait_soybean,trait_alfalfa,note\n"
+                    "524-659,Roundup PowerMAX 3,glyphosate-tolerant,glyphosate-tolerant,,Roundup\n"
+                    "241-310,,Clearfield,,,Pursuit\n"
+                    "100-1131,,,,,\n"
+                    " ,,,,,blank row\n", encoding="utf-8")
+    products = read_products(path)
+    assert list(products) == ["524-659", "241-310", "100-1131"]
+    assert products["524-659"] == {"brand": "Roundup PowerMAX 3", "trait_corn": "glyphosate-tolerant",
+                                   "trait_soybean": "glyphosate-tolerant", "note": "Roundup"}
+    assert products["241-310"] == {"trait_corn": "Clearfield", "note": "Pursuit"} and products["100-1131"] == {}
+
+
+def test_with_traits_sets_each_records_trait_for_its_crop():
+    records = [{"reg_no": "241-310", "crop": "corn"}, {"reg_no": "241-310", "crop": "soybean", "requires_trait": "old"}]
+    assert [r["requires_trait"] for r in with_traits(records, {"241-310": {"trait_corn": "Clearfield"}})] == [
+        "Clearfield", None]
+```
 
 `scout/labels/build_labels.py`:
 ```python
@@ -5085,6 +5128,7 @@ Usage: python -m scout.labels.build_labels [--only REG_NO ...]
 import argparse
 import csv
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from scout.agent.llm import Llm
@@ -5096,6 +5140,21 @@ from scout.labels.extract import extract_use_records, page_texts, verify
 HERE = Path(__file__).parent
 
 
+def read_products(path: Path) -> dict[str, dict[str, str]]:
+    """The CSV's rows by registration number, in file order, without blank cells. Optional columns: brand (the
+    name on the jug when PPLS lists another, such as a master label's code name) and trait_<crop> (the seed trait
+    the crop must carry for this product)."""
+    with open(path, encoding="utf-8") as handle:
+        rows = [row for row in csv.DictReader(handle) if row["reg_no"].strip()]
+    return {row["reg_no"].strip(): {k: v.strip() for k, v in row.items() if k != "reg_no" and v and v.strip()}
+            for row in rows}
+
+
+def with_traits(records: list[dict], products: dict[str, dict[str, str]]) -> list[dict]:
+    """Set every record's seed trait from the CSV, so editing a trait needs no new extraction."""
+    return [{**r, "requires_trait": products.get(r["reg_no"], {}).get(f"trait_{r['crop']}")} for r in records]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", nargs="*", default=None)
@@ -5105,10 +5164,8 @@ def main() -> None:
     pdf_dir.mkdir(exist_ok=True)
     out_path = HERE / "use_records.json"
     existing = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else []
-    with open(HERE / "focus_products.csv", encoding="utf-8") as handle:
-        reg_nos = [row["reg_no"].strip() for row in csv.DictReader(handle) if row["reg_no"].strip()]
-    if args.only:
-        reg_nos = [r for r in reg_nos if r in args.only]
+    products = read_products(HERE / "focus_products.csv")
+    reg_nos = [r for r in products if not args.only or r in args.only]
     records = [r for r in existing if r["reg_no"] not in reg_nos]
     for reg_no in reg_nos:
         previous = [r for r in existing if r["reg_no"] == reg_no]
@@ -5117,6 +5174,8 @@ def main() -> None:
             if not facts.is_herbicide or not facts.latest_pdf:
                 print(f"{reg_no}: skipped (not a herbicide or no label PDF)")
                 continue
+            if "brand" in products[reg_no]:
+                facts = replace(facts, product_name=products[reg_no]["brand"])
             pdf = download_pdf(facts.latest_pdf, pdf_dir, session)
             kept, dropped = verify(extract_use_records(pdf, facts, llm, weeds), page_texts(pdf))
             records += [r.model_dump() for r in kept]
@@ -5124,13 +5183,16 @@ def main() -> None:
         except Exception as error:  # one bad product must not stop the batch, nor cost it its earlier records
             records += previous
             print(f"{reg_no}: failed ({error}); kept {len(previous)} earlier records")
-    out_path.write_text(json.dumps(records, indent=1), encoding="utf-8")
+    out_path.write_text(json.dumps(with_traits(records, products), indent=1), encoding="utf-8")
     print(f"Wrote {len(records)} records to {out_path}")
 
 
 if __name__ == "__main__":
     main()
 ```
+
+Run: `python -m pytest tests/test_build_labels.py -v`
+Expected: 2 passed
 
 - [ ] **Step 3: Try two products first**
 
@@ -5149,7 +5211,7 @@ Pick 10 random entries from `use_records.json`, open each PDF at its `page`, and
 - [ ] **Step 6: Commit**
 
 ```bash
-git add scout/labels/focus_products.csv scout/labels/build_labels.py scout/labels/use_records.json docs/spike-notes.md
+git add scout/labels/focus_products.csv scout/labels/build_labels.py tests/test_build_labels.py scout/labels/use_records.json docs/spike-notes.md
 git commit -m "data: build verified label use records"
 ```
 
@@ -5343,6 +5405,13 @@ def test_report_uses_llm_text_when_numbers_check_out():
     assert report.explanation.startswith("Waterhemp was found")
 
 
+def test_explanation_input_names_a_required_seed_trait():
+    llm = FakeLlm([LlmTurn("r1", [], "Waterhemp was found. Read the label before use.")])
+    record = RECORD.model_copy(update={"requires_trait": "glufosinate-tolerant"})
+    build_report("w1", "soybean", _stops(), BOOK, [record], llm)
+    assert '"requires_trait": "glufosinate-tolerant"' in llm.requests[0]["input"][0]["content"][0]["text"]
+
+
 def test_report_falls_back_to_template_on_invented_numbers():
     llm = FakeLlm([LlmTurn("r1", [], "Spray 99 acres."), LlmTurn("r2", [], "Spray 98 acres.")])
     report = build_report("w1", "soybean", _stops(), BOOK, [RECORD], llm)
@@ -5448,7 +5517,8 @@ def build_report(walk_id: str, crop: str, stops: list[StopResult], weeds: WeedBo
         "crop": crop, "decision": d.decision, "treat_mode": d.treat_mode, "urgency": urgency_text,
         "species": [s.model_dump() for s in d.summaries], "rule_trace": d.rule_trace,
         "options": [{"product": o.record.product_name, "groups": o.record.herbicide_groups,
-                     "max_weed_height_in": o.record.max_weed_height_in, "over_size_limit": o.over_size_limit}
+                     "max_weed_height_in": o.record.max_weed_height_in, "over_size_limit": o.over_size_limit,
+                     "requires_trait": o.record.requires_trait}
                     for o in options],
     }, ensure_ascii=False)
     explanation = None
@@ -5470,7 +5540,7 @@ def build_report(walk_id: str, crop: str, stops: list[StopResult], weeds: WeedBo
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_field_agent.py -v`
-Expected: 5 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Commit**
 
@@ -5780,6 +5850,14 @@ def test_options_table_names_the_weed_each_row_is_for():
     assert re.search(r"<td>waterhemp</td>\s*<td>Product A \(100-1\)</td>", _html(_report()))
 
 
+def test_options_table_says_when_a_product_needs_a_seed_trait():
+    report = _report()
+    record = report.options[0].record.model_copy(update={"requires_trait": "glyphosate-tolerant"})
+    with_trait = report.model_copy(update={"options": [LabelOption(record=record)]})
+    assert "Requires glyphosate-tolerant seed" in _html(with_trait)
+    assert "seed</div>" not in _html(report)
+
+
 def test_html_shows_map_when_gps_present():
     html = _html(_report(gps=(41.5, -93.6)))
     assert "leaflet" in html and "41.5" in html and "Pins are shifted for privacy." in html
@@ -5893,7 +5971,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scout.report.render'`
   {% for o in report.options %}{% set r = o.record %}
   <tr>
     <td>{{ names.get(r.species_id, r.species_id) }}</td>
-    <td>{{ r.product_name }} ({{ r.reg_no }})</td>
+    <td>{{ r.product_name }} ({{ r.reg_no }}){% if r.requires_trait %}<div class="flag">Requires {{ r.requires_trait }} seed</div>{% endif %}</td>
     <td>{{ r.herbicide_groups|join(", ") }}</td>
     <td>{% if r.max_weed_height_in is not none %}Weeds up to {{ r.max_weed_height_in }} in{% endif %}{% if r.crop_stage_max %} · crop up to {{ r.crop_stage_max }}{% endif %}{% if o.over_size_limit %}<div class="flag">Weeds are over this size limit</div>{% endif %}</td>
     <td>{% if r.rate_min is not none %}{{ r.rate_min }}{% if r.rate_max is not none and r.rate_max != r.rate_min %}–{{ r.rate_max }}{% endif %} {{ r.rate_unit or "" }}{% else %}—{% endif %}</td>
@@ -6010,7 +6088,7 @@ def report_csv(report: FieldReport) -> str:
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_render.py -v`
-Expected: 9 passed
+Expected: 10 passed
 
 - [ ] **Step 6: Commit**
 

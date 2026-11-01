@@ -42,6 +42,14 @@ def test_options_table_names_the_weed_each_row_is_for():
     assert re.search(r"<td>waterhemp</td>\s*<td>Product A \(100-1\)</td>", _html(_report()))
 
 
+def test_options_table_says_when_a_product_needs_a_seed_trait():
+    report = _report()
+    record = report.options[0].record.model_copy(update={"requires_trait": "glyphosate-tolerant"})
+    with_trait = report.model_copy(update={"options": [LabelOption(record=record)]})
+    assert "Requires glyphosate-tolerant seed" in _html(with_trait)
+    assert "seed</div>" not in _html(report)
+
+
 def test_html_shows_map_when_gps_present():
     html = _html(_report(gps=(41.5, -93.6)))
     assert "leaflet" in html and "41.5" in html and "Pins are shifted for privacy." in html

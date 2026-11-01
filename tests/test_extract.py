@@ -62,6 +62,15 @@ def test_extract_crops_default_to_all_three_and_skip_unlabeled_ones(tmp_path):
     assert llm.requests == []
 
 
+def test_extract_matches_crop_sites_as_whole_words(tmp_path):
+    pdf = tmp_path / "label.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    llm = FakeLlm([LlmTurn("r1", [], json.dumps({"records": []}))])
+    extract_use_records(pdf, replace(FACTS, sites=["ACORN SQUASH", "CORN SALAD", "SOYBEANS (FOLIAR TREATMENT)"]),
+                        llm, small_weedbook())
+    assert len(llm.requests) == 1 and "on soybean only" in _prompt(llm, 0)
+
+
 def test_extract_reduces_herbicide_groups_to_digits(tmp_path):
     pdf = tmp_path / "label.pdf"
     pdf.write_bytes(b"%PDF-1.4 test")

@@ -285,13 +285,14 @@ Every box the agent sees or gives is `[x1, y1, x2, y2]` from 0 to 1000 on both a
 
 ## 9. Label knowledge base (offline, built during the event)
 
-1. The user fills `focus_products.csv` with ~20 common herbicides labeled for corn, soybean, or alfalfa: EPA registration number plus a short note.
+1. The user fills `focus_products.csv` with ~20 common herbicides labeled for corn, soybean, or alfalfa: EPA registration number, an optional brand name (when PPLS lists the product under a code name, one of its PPLS alternate brand names), the seed trait each crop needs for the product (blank when none, e.g. "glyphosate-tolerant" or "Clearfield"), plus a short note.
 2. `build_labels.py`, written fresh, does the following:
    - Calls the EPA PPLS API (`https://ordspub.epa.gov/ords/pesticides/cswu/ppls/<reg_no>`) for product name, active ingredients, sites, and pests.
    - Downloads the latest label PDF. The EPA server needs a legacy-TLS adapter.
-   - Sends each PDF to Muse Spark once per crop the label covers, asking for in-crop postemergence uses on that crop only. The answer must match a JSON schema for a list of `UseRecord`, with `species_id` values from `weeds.yaml` (synonyms provided).
+   - Sends each PDF to Muse Spark once per crop the label covers, asking for in-crop postemergence uses on that crop only, following the crop section's pointer to a weeds-controlled table when it has one, and skipping weeds the product alone only partially controls or suppresses. The answer must match a JSON schema for a list of `UseRecord`, with `species_id` values from `weeds.yaml` (synonyms provided).
    - Drops any record without a `page` and a `quote`.
    - Checks that each `quote` appears somewhere in the PDF's text, comparing letters and digits only so PDF line breaks, hyphenation and symbols can't break a match. Each kept record's page becomes the nearest page holding the quote, because EPA PDFs open with an acceptance letter. Records that fail are dropped and the drop counts logged.
+   - Copies each record's seed trait from the CSV (`requires_trait`). The report shows "Requires <trait> seed" under the product.
 3. `use_records.json` is committed. EPA labels are public documents.
 4. `lookup.find_label_options` keeps records where:
    - crop matches;

@@ -14,7 +14,9 @@ from scout.labels.epa import ProductFacts
 from scout.models import UseRecord
 
 MIN_QUOTE_KEY_CHARS = 12  # letters and digits left in a quote after _key
-SITE_WORD = {"corn": "CORN", "soybean": "SOYBEAN", "alfalfa": "ALFALFA"}  # as PPLS sites name the crops
+SITE_PATTERN = {  # as PPLS sites name the crops; whole words, so ACORN SQUASH and CORN SALAD are not corn
+    "corn": re.compile(r"\bCORN\b(?! SALAD)"), "soybean": re.compile(r"\bSOYBEANS?\b"),
+    "alfalfa": re.compile(r"\bALFALFA\b")}
 
 
 def _nullable(kind: str) -> dict:
@@ -53,9 +55,11 @@ USE_RECORDS_FORMAT = {
 }
 
 EXTRACT_PROMPT = """You are reading the EPA-registered label for {product} (EPA Reg. No. {reg_no}).
-Extract one record per weed for in-crop postemergence uses on {crop} only (for corn: field corn).
+Extract one record per weed for in-crop postemergence uses on {crop} only (for corn: field corn). When the {crop} \
+directions refer to a table of weeds controlled elsewhere in the label, take the weeds from that table.
 species_id must be one of these ids; map label weed names to them and skip weeds that do not map:
 {species}
+Skip weeds the label rates only as partially controlled or suppressed by this product used alone.
 For each record give: the maximum weed height in inches the label allows (null if none); crop stage limits such as \
 V2 or V8 (null if none); the rate range and unit as printed; the pre-harvest interval in days; the restricted-entry \
 interval in hours; the herbicide group number(s) printed on the label.
@@ -104,7 +108,8 @@ def extract_use_records(pdf_path: Path, facts: ProductFacts, llm, weeds: WeedBoo
     listing = "\n".join(f"- {sid}: {', '.join([weeds.get(sid).common_name, *weeds.get(sid).synonyms])}"
                         for sid in species)
     file = (Path(pdf_path).name, pdf_data_url(pdf_path))
-    crops = [crop for crop, word in SITE_WORD.items() if not facts.sites or any(word in s.upper() for s in facts.sites)]
+    crops = [crop for crop, pattern in SITE_PATTERN.items()
+             if not facts.sites or any(pattern.search(s.upper()) for s in facts.sites)]
     records = []
     for crop in crops:  # one smaller answer per crop: a single answer for a glyphosate label can run past the timeout
         prompt = EXTRACT_PROMPT.format(product=facts.product_name, reg_no=facts.reg_no, species=listing, crop=crop)

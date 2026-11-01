@@ -31,6 +31,13 @@ def test_report_uses_llm_text_when_numbers_check_out():
     assert report.explanation.startswith("Waterhemp was found")
 
 
+def test_explanation_input_names_a_required_seed_trait():
+    llm = FakeLlm([LlmTurn("r1", [], "Waterhemp was found. Read the label before use.")])
+    record = RECORD.model_copy(update={"requires_trait": "glufosinate-tolerant"})
+    build_report("w1", "soybean", _stops(), BOOK, [record], llm)
+    assert '"requires_trait": "glufosinate-tolerant"' in llm.requests[0]["input"][0]["content"][0]["text"]
+
+
 def test_report_falls_back_to_template_on_invented_numbers():
     llm = FakeLlm([LlmTurn("r1", [], "Spray 99 acres."), LlmTurn("r2", [], "Spray 98 acres.")])
     report = build_report("w1", "soybean", _stops(), BOOK, [RECORD], llm)

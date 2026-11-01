@@ -89,6 +89,7 @@ class UseRecord(BaseModel):
     page: int
     quote: str
     pdf_file: str | None = None
+    requires_trait: str | None = None  # seed trait the crop must carry (e.g. glyphosate-tolerant); from focus_products.csv
 
 
 class LabelOption(BaseModel):

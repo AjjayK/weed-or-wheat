@@ -58,7 +58,7 @@
   {% for o in report.options %}{% set r = o.record %}
   <tr>
     <td>{{ names.get(r.species_id, r.species_id) }}</td>
-    <td>{{ r.product_name }} ({{ r.reg_no }})</td>
+    <td>{{ r.product_name }} ({{ r.reg_no }}){% if r.requires_trait %}<div class="flag">Requires {{ r.requires_trait }} seed</div>{% endif %}</td>
     <td>{{ r.herbicide_groups|join(", ") }}</td>
     <td>{% if r.max_weed_height_in is not none %}Weeds up to {{ r.max_weed_height_in }} in{% endif %}{% if r.crop_stage_max %} · crop up to {{ r.crop_stage_max }}{% endif %}{% if o.over_size_limit %}<div class="flag">Weeds are over this size limit</div>{% endif %}</td>
     <td>{% if r.rate_min is not none %}{{ r.rate_min }}{% if r.rate_max is not none and r.rate_max != r.rate_min %}–{{ r.rate_max }}{% endif %} {{ r.rate_unit or "" }}{% else %}—{% endif %}</td>
