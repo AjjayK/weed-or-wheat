@@ -289,9 +289,9 @@ Every box the agent sees or gives is `[x1, y1, x2, y2]` from 0 to 1000 on both a
 2. `build_labels.py`, written fresh, does the following:
    - Calls the EPA PPLS API (`https://ordspub.epa.gov/ords/pesticides/cswu/ppls/<reg_no>`) for product name, active ingredients, sites, and pests.
    - Downloads the latest label PDF. The EPA server needs a legacy-TLS adapter.
-   - Sends each PDF to Muse Spark with a JSON schema for a list of `UseRecord`, restricted to the three crops and to `species_id` values from `weeds.yaml` (synonyms provided).
+   - Sends each PDF to Muse Spark once per crop the label covers, asking for in-crop postemergence uses on that crop only. The answer must match a JSON schema for a list of `UseRecord`, with `species_id` values from `weeds.yaml` (synonyms provided).
    - Drops any record without a `page` and a `quote`.
-   - Verifies each `quote` appears in the text of that page (PDF text extraction; normalized whitespace). It drops records that fail and logs the drop counts.
+   - Checks that each `quote` appears somewhere in the PDF's text, comparing letters and digits only so PDF line breaks, hyphenation and symbols can't break a match. Each kept record's page becomes the nearest page holding the quote, because EPA PDFs open with an acceptance letter. Records that fail are dropped and the drop counts logged.
 3. `use_records.json` is committed. EPA labels are public documents.
 4. `lookup.find_label_options` keeps records where:
    - crop matches;
