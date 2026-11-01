@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "scout",
+      "runtimeExecutable": ".venv/Scripts/python",
+      "runtimeArgs": ["-m", "uvicorn", "scout.app.main:create_app", "--factory", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}
