@@ -36,6 +36,7 @@ def test_schemas_name_seven_tools():
     assert schemas["mark"]["properties"]["kind"]["enum"] == ["crop", "weed", "patch"]
     assert "all_weeds_marked" in schemas["finish"]["required"]
     assert schemas["survey"]["required"] == ["crop_seen", "weeds_visible"]
+    assert schemas["survey"]["properties"]["weeds_visible"]["maximum"] == 1000
 
 
 def test_mark_sends_pixels_in_one_request_and_reports_thousandths():
@@ -341,7 +342,8 @@ def test_a_rejected_chunk_names_its_boxes_and_registers_nothing():
     runner, state = _runner(_SecondChunkFails())
     items = [{"box": box, "label": "w"} for box in [WEED_A, WEED_B, *[BARE] * 18]]
     result = runner.run("mark", {"kind": "weed", "boxes": items})
-    assert result.output == "error: SAM rejected the request: boxes 17-20: too many masks"
+    assert result.output == ("error: SAM rejected the request: boxes 17-20: too many masks. Nothing from this call "
+                             "was marked: send all the boxes again, changing those.")
     assert state.instances == {} and state.bad_requests["mark"] == 1
     assert result.images == []
 
@@ -355,7 +357,7 @@ def test_mark_names_the_box_that_is_malformed():
                    (2, {"box": [1, 2, 3, True], "label": "w"}), (2, {"box": "600,600,700,700", "label": "w"}),
                    (2, {"box": [1, 2, 3, float("nan")], "label": "w"})):
         out = runner.run("mark", {"kind": "weed", "boxes": [good, bad]}).output
-        assert out == f"error: box {n}: needs a box of four numbers and a label", bad
+        assert out == f"error: box {n}: needs a box of four numbers", bad
     assert sam.calls == []
 
 

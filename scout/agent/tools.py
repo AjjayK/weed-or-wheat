@@ -74,7 +74,7 @@ _BOX = {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems"
 TOOL_SCHEMAS = [
     _fn("survey", "Look over the photo first: the crop you see, and how many weed plants are visible.",
         {"crop_seen": {"type": "string", "enum": list(CROPS_SEEN)},
-         "weeds_visible": {"type": "integer", "minimum": 0,
+         "weeds_visible": {"type": "integer", "minimum": 0, "maximum": MAX_ESTIMATE,
                            "description": "Your estimate of separate weed plants visible, small ones included"}},
         ["crop_seen", "weeds_visible"]),
     _fn("segment", "Ask SAM 3.1 for every instance of one concept, a short noun phrase. It finds \"crop row\" "
@@ -179,8 +179,9 @@ class ToolRunner:
         def ask(start: int, chunk: list) -> list[SamRecord]:
             try:
                 return self.sam.segment_boxes(self.state.image, chunk)
-            except BadRequest as error:  # say which boxes, so the agent can fix and resend just those
-                raise BadRequest(f"boxes {start + 1}-{start + len(chunk)}: {error}") from error
+            except BadRequest as error:  # name the boxes at fault; the whole call fails, so all boxes must be resent
+                raise BadRequest(f"boxes {start + 1}-{start + len(chunk)}: {error}. Nothing from this call was "
+                                 "marked: send all the boxes again, changing those.") from error
 
         with ThreadPoolExecutor(max_workers=min(SAM_WORKERS, len(chunks))) as pool:
             answers = list(pool.map(ask, starts, chunks))
@@ -272,7 +273,7 @@ class ToolRunner:
             raise ValueError(f"give 1 to {MAX_MARK_BOXES} boxes")
         for n, item in enumerate(boxes, start=1):
             if not _is_box_item(item):
-                raise ValueError(f"box {n}: needs a box of four numbers and a label")
+                raise ValueError(f"box {n}: needs a box of four numbers")
         pixel_boxes = [to_pixels(item["box"], self.state.size) for item in boxes]
         labels = [str(item.get("label") or kind).strip() for item in boxes]
         if kind == "patch":
