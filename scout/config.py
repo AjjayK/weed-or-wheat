@@ -15,9 +15,9 @@ class Settings:
     sam_model: str = "sam-3.1"
     full_max_px: int = 2048
     work_max_px: int = 1024
-    max_tool_calls: int = 12
-    stop_timeout_s: float = 240.0  # Muse Spark takes 13-16 s per turn
-    max_concurrent_stops: int = 4
+    max_tool_calls: int = 30  # generous: marking every weed takes more turns than sampling them did
+    stop_timeout_s: float = 360.0  # Muse Spark takes 13-16 s per turn; a thorough stop needs 2-4 minutes
+    max_concurrent_stops: int = 10  # every photo of a walk at once: the walk takes as long as its slowest stop
     max_photos: int = 10
     max_upload_bytes: int = 25_000_000
     walks_per_ip_per_hour: int = 3

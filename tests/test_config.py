@@ -14,7 +14,8 @@ def test_get_settings_reads_env(monkeypatch):
 def test_settings_defaults():
     settings = Settings(api_key="x")
     assert settings.base_url == "https://api.meta.ai/v1"
-    assert settings.work_max_px == 1024 and settings.max_tool_calls == 12
+    assert settings.work_max_px == 1024 and settings.max_tool_calls == 30
+    assert settings.stop_timeout_s == 360.0 and settings.max_concurrent_stops == 10
 
 
 def test_public_site_defaults():

@@ -235,7 +235,7 @@ def test_measure_and_finish_run_last_whatever_order_the_model_lists_them():
 
 
 def test_time_limit_closes_the_stop_after_the_turn_in_progress():
-    ticks = itertools.count(0, 100)  # every clock reading is 100 s later: the 240 s budget is gone after one turn
+    ticks = itertools.count(0, 200)  # every clock reading is 200 s later: the 360 s budget is gone after one turn
     llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""), LlmTurn("r2", [_classify("s0-i3", "s0-i4")], "")])
     result, _ = _run(llm, clock=lambda: float(next(ticks)))
     assert len(llm.requests) == 1 and result.status == "ok"
