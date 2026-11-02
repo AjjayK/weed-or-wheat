@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 
-from scout.vision.overlay import FLAG_RGB, render_overlay
+from scout.vision.overlay import AREA_RGB, FLAG_RGB, render_overlay
 
 
 def test_overlay_tints_crop_green_weed_magenta_and_outlines_flags():
@@ -29,4 +29,13 @@ def test_overlay_shades_band_under_plants_and_skips_empty_boxes():
     assert out.getpixel((0, 5)) == (225, 225, 223)
     r, g, b = out.getpixel((0, 0))
     assert r > g and b > g
+    assert out.getpixel((5, 5)) == (255, 255, 255)
+
+
+def test_overlay_outlines_weed_areas_in_blue_under_flag_boxes():
+    image = Image.new("RGB", (10, 10), (255, 255, 255))
+    empty = np.zeros((10, 10), bool)
+    out = render_overlay(image, empty, empty, areas=[(0, 0, 10, 10)], flagged=[(0, 0, 5, 5)])
+    assert out.getpixel((9, 9)) == AREA_RGB
+    assert out.getpixel((0, 0)) == FLAG_RGB  # a flag box drawn later stays visible
     assert out.getpixel((5, 5)) == (255, 255, 255)
