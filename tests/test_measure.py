@@ -126,3 +126,13 @@ def test_approximate_only_for_big_pieces_outside_close_ups():
 def test_grass_words_in_labels_mean_unidentified_grass():
     assert species_key(_boxed("a", "weed", prompt="giant foxtail")) == "unidentified_grass"
     assert species_key(_boxed("b", "weed", prompt="pigweed seedling")) == "unidentified_broadleaf"
+
+
+def test_a_weed_area_counts_its_pieces_and_makes_the_count_approximate():
+    instances, masks = _setup()
+    area = Instance(id="p", source="patch", prompt="horsetail", box=(40, 40, 50, 50), area_px=100, role="weed",
+                    species_id="waterhemp", plant_count=7)
+    masks["p"] = _mask((40, 40, 50, 50))
+    m = compute_metrics(instances + [area], masks, SIZE, "close_up")
+    assert m.weed_count == 9 and m.species["waterhemp"] == 8 and m.count_approximate is True
+    assert m.weed_cover_pct == 3.0  # w1, w2 and the area: 100 px each

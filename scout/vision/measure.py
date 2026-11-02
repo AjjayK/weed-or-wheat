@@ -81,12 +81,12 @@ def compute_metrics(instances: list[Instance], masks: dict[str, np.ndarray], siz
             species_masks[key] |= own
         else:
             species_masks[key] = own
-        species_counts[key] = species_counts.get(key, 0) + 1
+        species_counts[key] = species_counts.get(key, 0) + inst.plant_count  # a weed area holds several plants
         if inst.height_in is not None:
             heights.append(inst.height_in)
             species_heights[key] = max(species_heights.get(key, 0.0), inst.height_in)
-        if view_type != "close_up" and own_px > APPROX_PIECE_FRAC * ground_px:
-            approximate = True
+        if inst.source == "patch" or (view_type != "close_up" and own_px > APPROX_PIECE_FRAC * ground_px):
+            approximate = True  # a weed area's pieces are not exactly its plants
     crop &= ~weed_mask
     weed_px = int(weed_mask.sum())
     count = sum(species_counts.values())
