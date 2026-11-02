@@ -13,6 +13,7 @@ from scout.app.ingest import StopImage
 from scout.models import AgentStep, Box, Instance
 from scout.vision import masks as mk
 from scout.vision.overlay import render_overlay
+from scout.vision.patches import green_mask, patch_mask
 from scout.vision.rows import band_mask, canopy_band, fit_rows
 
 SCALE = 1000
@@ -24,6 +25,9 @@ CHECK_OVERLAP = 0.3  # a weed mask this much on any crop is kept but flagged for
 PATCH_FRAC = 0.12  # a weed mask over 12% of the frame is a patch of plants: kept as one, flagged, count approximate
 PATCH_MOSTLY_CROP = 0.5  # a patch this much on any crop (canopy too) is crop foliage, not a weed patch: dropped
 MAX_BOXES = 16  # SAM takes at most 16 objects per request
+MAX_MARK_BOXES = 120  # one mark call; code splits it into SAM requests of MAX_BOXES
+PATCH_BOX_MOSTLY_CROP = 0.5  # a weed-area box this much on crop is a box around the row: refused
+UNMARKED_SHARE = 0.8  # marking fewer plants than this share of the agent's own estimate suggests weeds were missed
 
 
 class StopFailed(Exception):
@@ -70,6 +74,11 @@ class StopState:
         self.calls = 0
         self.bad_requests: dict[str, int] = {}
         self.box_cap_hit = False  # a weed mark used all 16 boxes, so the weed count is a floor
+        self.patch_boxes: dict[str, Box] = {}  # weed areas the agent drew; their masks follow the crop
+        self.crop_seen: str | None = None  # from survey
+        self.weeds_estimate: int | None = None  # from survey: weed plants the agent sees
+        self.all_weeds_marked: bool | None = None  # from finish; None when the stop never finished
+        self._green: np.ndarray | None = None
         self.finished = False
         self._next = 0
         self._on_step = on_step
@@ -141,10 +150,63 @@ class StopState:
     def has_patch(self) -> bool:
         return any(i.role == "weed" and self.is_patch(i) for i in self.instances.values())
 
+    @property
+    def green(self) -> np.ndarray:
+        if self._green is None:
+            self._green = green_mask(self.image.work)
+        return self._green
+
+    def _crop_for_areas(self) -> np.ndarray:
+        """Crop that weed areas leave out. A weed area later classified as crop is not crop for the others."""
+        return self.union_of(lambda i: i.role == "crop" and i.source != "patch")
+
+    def add_patch(self, box: Box, label: str) -> tuple[Instance | None, str | None]:
+        """Register a weed area measured from green pixels, or say why not."""
+        left, top, right, bottom = box
+        crop = self._crop_for_areas()
+        if crop[top:bottom, left:right].mean() > PATCH_BOX_MOSTLY_CROP:
+            return None, "mostly crop: box the weeds between the rows, not the row"
+        mask, pieces = patch_mask(self.green, box, crop)
+        if not mask.any():
+            return None, "no green weed pixels in this area"
+        self._next += 1
+        inst = Instance(id=f"s{self.image.index}-i{self._next}", source="patch", prompt=label, box=box,
+                        area_px=int(mask.sum()), role="weed", plant_count=max(pieces, 1))
+        self.instances[inst.id], self.masks[inst.id], self.patch_boxes[inst.id] = inst, mask, box
+        return inst, None
+
+    def refresh_patches(self) -> None:
+        """Recompute every weed area against the current crop, so a crop leaf marked later leaves the area."""
+        crop = self._crop_for_areas()
+        for iid, box in self.patch_boxes.items():
+            mask, pieces = patch_mask(self.green, box, crop)
+            self.masks[iid] = mask
+            self.instances[iid].area_px, self.instances[iid].plant_count = int(mask.sum()), max(pieces, 1)
+
+    def has_weed_area(self) -> bool:
+        return any(i.role == "weed" and i.source == "patch" for i in self.instances.values())
+
+    def weeds_marked(self) -> tuple[int, int]:
+        """(weeds boxed one by one, weed areas)."""
+        weeds = [i for i in self.instances.values() if i.role == "weed"]
+        areas = sum(1 for i in weeds if i.source == "patch")
+        return len(weeds) - areas, areas
+
+    def plants_marked(self) -> int:
+        return sum(i.plant_count for i in self.instances.values() if i.role == "weed")
+
+    def maybe_unmarked(self) -> bool:
+        """The agent didn't confirm every weed is marked, or, without weed areas, marked well under its estimate."""
+        if self.all_weeds_marked is not True:
+            return True
+        if self.weeds_estimate and not self.has_weed_area():
+            return self.plants_marked() < UNMARKED_SHARE * self.weeds_estimate
+        return False
+
     def count_approximate(self, view_type: str | None = None) -> bool:
-        """A patch counts as one weed (but a big plant in a close-up is just a plant), and a capped mark may have
-        left weeds unmarked."""
-        return (self.has_patch() and view_type != "close_up") or self.box_cap_hit
+        """A patch counts as one weed (but a big plant in a close-up is just a plant), a weed area's pieces are not
+        exactly its plants, and a capped mark may have left weeds unmarked."""
+        return (self.has_patch() and view_type != "close_up") or self.has_weed_area() or self.box_cap_hit
 
     def ensure_sky(self, sam) -> None:
         """Sky for row and wide views, asked once. Best effort: without it, cover is measured over the whole photo."""
@@ -179,4 +241,5 @@ class StopState:
         weed = self.union_of(lambda i: i.role == "weed")
         crop = self.union_of(lambda i: i.role == "crop") & ~weed  # weeds win: a weed in the row keeps its pixels
         flagged = [i.box for i in self.instances.values() if i.role == "weed" and i.check_this]
-        return render_overlay(self.image.work, crop, weed, self.row_band(), flagged)
+        areas = [self.patch_boxes[i.id] for i in self.instances.values() if i.role == "weed" and i.id in self.patch_boxes]
+        return render_overlay(self.image.work, crop, weed, self.row_band(), flagged, areas)

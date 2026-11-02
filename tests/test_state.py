@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from scout.agent.state import StopState, to_pixels, to_thousandths
-from tests.helpers import field_scene, make_image, mask_record, rect
+from scout.vision.overlay import AREA_RGB
+from tests.helpers import field_photo, field_scene, make_image, mask_record, rect
 
 
 def _state(crop="soybean"):
@@ -137,3 +138,50 @@ def test_ensure_sky_is_best_effort_and_not_retried():
     assert sam.calls == 1 and state.sky is None
     assert [(s.tool, s.ok) for s in state.steps] == [("sky", False)]
     assert "TimeoutError" in state.steps[0].summary
+
+
+def test_weed_area_counts_green_pixels_away_from_crop():
+    state = StopState(field_photo(), "soybean")
+    state.add_mask(rect(10, 0, 30, 100), "prompt", "soybean row", role="crop")
+    inst, note = state.add_patch((50, 50, 90, 90), "horsetail")
+    assert note is None and inst.source == "patch" and inst.role == "weed" and inst.box == (50, 50, 90, 90)
+    assert inst.area_px == 200 and inst.plant_count == 2 and state.patch_boxes == {inst.id: (50, 50, 90, 90)}
+    assert state.has_weed_area() and state.count_approximate("close_up")
+    assert state.weeds_marked() == (0, 1) and state.plants_marked() == 2
+
+
+def test_a_crop_leaf_marked_later_leaves_the_weed_area():
+    state = StopState(field_photo(), "soybean")
+    inst, _ = state.add_patch((50, 50, 90, 90), "horsetail")
+    state.add_mask(rect(70, 60, 75, 80), "prompt", "soybean leaf", role="crop")
+    state.refresh_patches()
+    assert inst.area_px == 100 and inst.plant_count == 1 and state.masks[inst.id].sum() == 100
+
+
+def test_weed_area_on_the_row_or_on_bare_soil_is_refused():
+    state = StopState(field_photo(), "soybean")
+    state.add_mask(rect(10, 0, 30, 100), "prompt", "soybean row", role="crop")
+    assert state.add_patch((5, 10, 35, 90), "row") == (None, "mostly crop: box the weeds between the rows, not the row")
+    assert state.add_patch((35, 10, 55, 40), "soil") == (None, "no green weed pixels in this area")
+    assert state.patch_boxes == {}
+
+
+def test_unmarked_weeds_are_suspected_until_confirmed_and_the_estimate_is_met():
+    state = StopState(field_photo(), "soybean")
+    assert state.maybe_unmarked()  # finish never said every weed is marked
+    state.all_weeds_marked, state.weeds_estimate = True, 10
+    state.add_mask(rect(60, 60, 65, 80), "prompt", "waterhemp", role="weed")
+    assert state.maybe_unmarked()  # 1 plant against an estimate of 10
+    state.weeds_estimate = 1
+    assert not state.maybe_unmarked()
+    state.weeds_estimate = 10
+    state.add_patch((66, 50, 90, 90), "horsetail")
+    assert not state.maybe_unmarked()  # a weed area covers what boxes can't count
+    state.all_weeds_marked = False
+    assert state.maybe_unmarked()
+
+
+def test_overlay_outlines_weed_areas_in_blue():
+    state = StopState(field_photo(), "soybean")
+    state.add_patch((50, 50, 90, 90), "horsetail")
+    assert state.overlay().getpixel((50, 70)) == AREA_RGB

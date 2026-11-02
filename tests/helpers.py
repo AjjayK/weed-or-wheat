@@ -122,3 +122,18 @@ class FakeLlm:
         if isinstance(turn, Exception):
             raise turn
         return turn
+
+
+from PIL import ImageDraw
+
+
+def field_photo(index=0):
+    """100x100 soil with a green soybean row (x 10-29) and two green weed shoots (x 60-64 and 70-74, y 60-79)."""
+    image = Image.new("RGB", (100, 100), (110, 80, 50))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((10, 0, 29, 99), fill=(60, 140, 40))
+    draw.rectangle((60, 60, 64, 79), fill=(60, 140, 40))
+    draw.rectangle((70, 60, 74, 79), fill=(60, 140, 40))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return load_image(index, buf.getvalue())
