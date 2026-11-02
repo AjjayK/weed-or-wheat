@@ -4,7 +4,9 @@ from dataclasses import replace
 
 from scout.agent.llm import LlmError, LlmTurn, ToolCall
 from scout.agent.prompts import stop_instructions
-from scout.agent.stop_agent import run_stop
+from scout.agent.state import MAX_MARK_BOXES
+from scout.agent.stop_agent import UNMARKED_FLAG, crop_flag, run_stop
+from scout.agent.tools import OVERLAY_CAPTION
 from scout.config import Settings
 from scout.retry import BadRequest
 from tests.helpers import FakeLlm, FakeSam, make_image, small_weedbook
@@ -23,9 +25,9 @@ def _classify(*ids, species=None, confidence="medium"):
          "id_confidence": confidence} for i in ids]})
 
 
-def _close(view_type="row"):
+def _close(view_type="row", all_marked=True):
     return [ToolCall("c-m", "measure", {"view_type": view_type}),
-            ToolCall("c-f", "finish", {"crop_stage": None, "notes": "done"})]
+            ToolCall("c-f", "finish", {"crop_stage": None, "notes": "done", "all_weeds_marked": all_marked})]
 
 
 class TimeoutSam(FakeSam):
@@ -61,7 +63,8 @@ def test_full_stop():
             {"instance_id": "s0-i4", "role": "weed", "species_id": "marestail", "height_in": None, "leaf_count": None,
              "id_confidence": "low"}]})], ""),
         LlmTurn("r4", [ToolCall("c5", "measure", {"view_type": "top_down"}),
-                       ToolCall("c6", "finish", {"crop_stage": "V3", "notes": "Two weeds between rows."})], ""),
+                       ToolCall("c6", "finish", {"crop_stage": "V3", "notes": "Two weeds between rows.",
+                                                 "all_weeds_marked": True})], ""),
     ])
     steps = []
     result, _ = _run(llm, on_step=steps.append)
@@ -71,7 +74,7 @@ def test_full_stop():
     assert result.flags == ["Check s0-i4: low confidence"]
     assert len(steps) == len(result.steps) == 6
     first, third = llm.requests[0], llm.requests[2]
-    assert [t["name"] for t in first["tools"]][:2] == ["segment", "mark"] and "0 to 1000" in first["instructions"]
+    assert [t["name"] for t in first["tools"]][:3] == ["survey", "segment", "mark"] and "0 to 1000" in first["instructions"]
     assert third["previous_response_id"] == "r2"
     assert [part["type"] for part in third["input"]] == ["function_call_output", "message"]  # the zoom image rides
     # in a user message after the tool output
@@ -82,7 +85,8 @@ def test_crop_marks_run_first_within_a_turn():
                    LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close()], "")])
     result, state = _run(llm)
     assert [s.summary for s in result.steps[:2]] == ["Mark crop: 2 of 2 boxes kept", "Mark weed: 2 of 3 boxes kept"]
-    assert [p["call_id"] for p in llm.requests[1]["input"]] == ["c2", "c1"]  # outputs keep the model's order
+    outputs = [p["call_id"] for p in llm.requests[1]["input"] if p.get("type") == "function_call_output"]
+    assert outputs == ["c2", "c1"]  # outputs keep the model's order
     assert result.status == "ok" and result.weed_count == 2 and state.instances["s0-i1"].role == "crop"
 
 
@@ -92,7 +96,9 @@ def test_call_limit_closes_stop_and_flags_unclassified_weeds():
     result, _ = _run(llm, settings=replace(SETTINGS, max_tool_calls=3))
     assert result.status == "ok" and result.weed_count == 2
     assert any(step.tool == "limit" for step in result.steps)
-    assert result.flags == ["Check s0-i3: marked but never classified", "Check s0-i4: marked but never classified"]
+    assert result.flags == ["Check s0-i3: marked but never classified", "Check s0-i4: marked but never classified",
+                            UNMARKED_FLAG]
+    assert result.count_approximate is True
 
 
 PATCH = ToolCall("c2", "mark", {"kind": "weed", "boxes": [{"box": [400, 750, 1000, 1000], "label": "foxtail"}]})
@@ -152,14 +158,14 @@ def test_a_lost_conversation_is_resent_in_full_and_the_stop_goes_on_stateless():
     assert retry["previous_response_id"] is None  # the same turn, resent without the chain
     assert retry["input"][0] == first["input"][0]  # starts with the photo message
     assert _kinds(retry["input"]) == ["message", "function_call", "function_call",
-                                      "function_call_output", "function_call_output"]
-    assert [i["call_id"] for i in retry["input"][1:3]] == [i["call_id"] for i in retry["input"][3:]] == ["c1", "c2"]
+                                      "function_call_output", "function_call_output", "message"]
+    assert [i["call_id"] for i in retry["input"][1:3]] == [i["call_id"] for i in retry["input"][3:5]] == ["c1", "c2"]
     assert retry["input"][1]["name"] == "mark" and json.loads(retry["input"][1]["arguments"])["kind"] == "crop"
-    assert retry["input"][3:] == lost["input"]  # exactly the items the lost request carried
+    assert retry["input"][3:] == lost["input"]  # exactly the items the lost request carried: outputs and the picture
     assert last["previous_response_id"] is None  # the rest of the stop stays stateless
-    assert last["input"][:5] == retry["input"]  # the history only grows
-    assert _kinds(last["input"][5:]) == ["function_call", "function_call_output", "message"]
-    assert [i["call_id"] for i in last["input"][5:7]] == ["c3", "c3"]  # the zoom call, its output, then the close-up
+    assert last["input"][:6] == retry["input"]  # the history only grows
+    assert _kinds(last["input"][6:]) == ["function_call", "function_call_output", "message"]
+    assert [i["call_id"] for i in last["input"][6:8]] == ["c3", "c3"]  # the zoom call, its output, then the close-up
     retries = [s for s in result.steps if s.tool == "retry"]
     assert [(s.ok, s.summary) for s in retries] == [(False, "Muse Spark lost the conversation; resent it in full")]
 
@@ -267,3 +273,56 @@ def test_instructions_use_thousandths_and_crop_hints():
     assert "estimate" in soybean and "null" in soybean
     assert "close to the camera" in soybean and "close to the camera" in alfalfa
     assert "hug each row's plants" in soybean
+
+
+SURVEY = ToolCall("c0", "survey", {"crop_seen": "corn", "weeds_visible": 2})
+
+
+def test_survey_runs_first_and_a_mismatched_crop_is_flagged():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS, SURVEY], ""),
+                   LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close()], "")])
+    result, _ = _run(llm)
+    assert result.steps[0].tool == "survey" and result.crop_seen == "corn"
+    assert result.flags == ["This photo looks like corn, not soybean"]
+    weeds = next(p for p in llm.requests[1]["input"] if p.get("call_id") == "c2")
+    assert json.loads(weeds["output"])["weeds_estimate"] == 2  # the survey ran before the weed mark
+
+
+def test_only_the_latest_marking_picture_rides_along():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""),
+                   LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close()], "")])
+    _run(llm)
+    messages = [p for p in llm.requests[1]["input"] if p.get("type") == "message"]
+    assert len(messages) == 1
+    images = [c for c in messages[0]["content"] if c["type"] == "input_image"]
+    assert len(images) == 1 and OVERLAY_CAPTION in messages[0]["content"][0]["text"]
+
+
+def test_marking_well_under_the_estimate_is_flagged():
+    survey = ToolCall("c0", "survey", {"crop_seen": "soybean", "weeds_visible": 10})
+    llm = FakeLlm([LlmTurn("r1", [survey, MARK_CROP, MARK_WEEDS], ""),
+                   LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close()], "")])
+    result, _ = _run(llm)
+    assert result.flags == [UNMARKED_FLAG] and result.count_approximate is True
+
+
+def test_the_agent_saying_weeds_remain_is_flagged():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""),
+                   LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close(all_marked=False)], "")])
+    result, _ = _run(llm)
+    assert result.flags == [UNMARKED_FLAG]
+
+
+def test_crop_flag_wording():
+    assert crop_flag("corn", "soybean") == "This photo looks like corn, not soybean"
+    assert crop_flag("other", "corn") == "This photo doesn't look like corn"
+    assert crop_flag("unsure", "corn") is None and crop_flag(None, "corn") is None
+    assert crop_flag("corn", "corn") is None
+
+
+def test_the_floor_flag_names_the_mark_limit():
+    many = ToolCall("c2", "mark", {"kind": "weed", "boxes": [{"box": [600, 600, 700, 700], "label": "w"}] +
+                                   [{"box": [400, 500, 500, 600], "label": "w"}] * (MAX_MARK_BOXES - 1)})
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, many], ""), LlmTurn("r2", [_classify("s0-i3"), *_close("close_up")], "")])
+    result, _ = _run(llm)
+    assert f"Weed count is a floor: a mark call used all {MAX_MARK_BOXES} boxes" in result.flags
