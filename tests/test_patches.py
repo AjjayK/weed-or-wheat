@@ -43,3 +43,14 @@ def test_patch_leaves_out_crop_and_a_margin_around_it():
     crop[20:40, 46:50] = True  # crop 1 px right of the second shoot: the 3 px margin takes its columns 43-44
     mask, pieces = patch_mask(green, (10, 10, 95, 95), crop)
     assert pieces == 2 and mask.sum() == 160
+
+
+def test_dark_shadow_and_dark_soil_with_a_slight_green_cast_are_not_green():
+    image = Image.new("RGB", (60, 60), SOIL)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((5, 5, 24, 24), fill=(10, 17, 16))  # furrow shadow under a blue sky: G = B > R
+    draw.rectangle((30, 5, 49, 24), fill=(30, 34, 26))  # dark loam, G a few levels over R
+    draw.rectangle((5, 30, 24, 49), fill=(23, 47, 24))  # a leaf in shade: dark but plainly green
+    green = green_mask(image)
+    assert not green[15, 15] and not green[15, 40]
+    assert green[40, 15]
