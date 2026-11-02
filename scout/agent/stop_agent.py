@@ -15,6 +15,7 @@ from scout.vision.measure import compute_metrics
 
 FAILED_FLAG = "This stop could not be analyzed"
 UNMARKED_FLAG = "Some weeds may be unmarked: cover and count are minimums"
+MAX_CHECK_FLAGS = 10  # per-plant "Check ..." lines shown for one stop; the rest are counted in one line
 
 
 def run_order(calls: list[ToolCall]) -> list[ToolCall]:
@@ -47,7 +48,7 @@ def crop_flag(crop_seen: str | None, crop: str) -> str | None:
 def _failed(state: StopState) -> StopResult:
     image = state.image
     return StopResult(stop_index=image.index, image_hash=image.hash, gps=image.gps, steps=state.steps,
-                      flags=[FAILED_FLAG], status="failed")
+                      crop_seen=state.crop_seen, flags=[FAILED_FLAG], status="failed")
 
 
 def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settings: Settings,
@@ -123,17 +124,22 @@ def finalize(state: StopState, sam) -> StopResult:
         state.ensure_sky(sam)
     m = compute_metrics(list(state.instances.values()), state.masks, state.size, view, state.sky, state.row_band())
     instances = list(state.instances.values())
-    flags = [_flag(i) for i in instances if i.role == "weed" and i.check_this]
+    # Stop-level flags first, then one line per plant to check, capped: up to 120 weeds could each be unclassified.
+    flags = []
     mismatch = crop_flag(state.crop_seen, state.crop)
     if mismatch:
-        flags.insert(0, mismatch)
-    if m.count_approximate or (state.has_patch() and view != "close_up") or state.has_weed_area():
-        flags.append("Weed count is approximate: some weeds merged into patches")
+        flags.append(mismatch)
     if state.box_cap_hit:
         flags.append(f"Weed count is a floor: a mark call used all {MAX_MARK_BOXES} boxes")
     unmarked = state.maybe_unmarked(plants=m.weed_count)
     if unmarked:
         flags.append(UNMARKED_FLAG)
+    if m.count_approximate or (state.has_patch() and view != "close_up") or state.has_weed_area():
+        flags.append("Weed count is approximate: some weeds merged into patches or were counted in weed areas")
+    checks = [_flag(i) for i in instances if i.role == "weed" and i.check_this]
+    flags += checks[:MAX_CHECK_FLAGS]
+    if len(checks) > MAX_CHECK_FLAGS:
+        flags.append(f"…and {len(checks) - MAX_CHECK_FLAGS} more plants to check")
     has_crop = any(i.role == "crop" for i in instances)
     # Alfalfa is solid-seeded and its crop boxes are optional, so a worked alfalfa stop counts without them.
     worked = state.view_type is not None or any(i.role == "weed" for i in instances)

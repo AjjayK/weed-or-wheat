@@ -5,11 +5,11 @@ from dataclasses import replace
 from scout.agent.llm import LlmError, LlmTurn, ToolCall
 from scout.agent.prompts import stop_instructions
 from scout.agent.state import MAX_MARK_BOXES
-from scout.agent.stop_agent import UNMARKED_FLAG, crop_flag, run_stop
+from scout.agent.stop_agent import MAX_CHECK_FLAGS, UNMARKED_FLAG, crop_flag, latest_overlay_only, run_stop
 from scout.agent.tools import OVERLAY_CAPTION
 from scout.config import Settings
 from scout.retry import BadRequest
-from tests.helpers import FakeLlm, FakeSam, make_image, small_weedbook
+from tests.helpers import FakeLlm, FakeSam, make_image, rect, small_weedbook
 
 SETTINGS = Settings(api_key="test")
 MARK_CROP = ToolCall("c1", "mark", {"kind": "crop", "boxes": [{"box": [100, 0, 300, 1000], "label": "soybean row"},
@@ -96,8 +96,8 @@ def test_call_limit_closes_stop_and_flags_unclassified_weeds():
     result, _ = _run(llm, settings=replace(SETTINGS, max_tool_calls=3))
     assert result.status == "ok" and result.weed_count == 2
     assert any(step.tool == "limit" for step in result.steps)
-    assert result.flags == ["Check s0-i3: marked but never classified", "Check s0-i4: marked but never classified",
-                            UNMARKED_FLAG]
+    assert result.flags == [UNMARKED_FLAG, "Check s0-i3: marked but never classified",
+                            "Check s0-i4: marked but never classified"]  # stop-level flags come first
     assert result.count_approximate is True
 
 
@@ -108,7 +108,8 @@ def test_patch_makes_the_count_approximate():
     llm = FakeLlm([LlmTurn("r1", [MARK_CROP, PATCH], ""), LlmTurn("r2", [_classify("s0-i3"), *_close("top_down")], "")])
     result, _ = _run(llm)
     assert result.weed_count == 1 and result.count_approximate is True
-    assert "Weed count is approximate: some weeds merged into patches" in result.flags
+    assert ("Weed count is approximate: some weeds merged into patches or were counted in weed areas"
+            in result.flags)
 
 
 def test_a_big_plant_in_a_close_up_is_not_a_patch():
@@ -326,3 +327,33 @@ def test_the_floor_flag_names_the_mark_limit():
     llm = FakeLlm([LlmTurn("r1", [MARK_CROP, many], ""), LlmTurn("r2", [_classify("s0-i3"), *_close("close_up")], "")])
     result, _ = _run(llm)
     assert f"Weed count is a floor: a mark call used all {MAX_MARK_BOXES} boxes" in result.flags
+
+
+def test_a_failed_stop_keeps_the_crop_it_saw():
+    result, _ = _run(FakeLlm([LlmTurn("r1", [SURVEY, MARK_CROP], ""), LlmError("response r2 was incomplete")]))
+    assert result.status == "failed" and result.crop_seen == "corn"
+    result, _ = _run(FakeLlm([LlmTurn("r1", [SURVEY], ""), LlmTurn("r2", [], "Prose."), LlmTurn("r3", [], "Prose.")]))
+    assert result.status == "failed" and result.crop_seen == "corn"  # surveyed, then marked nothing
+
+
+def test_latest_overlay_only_keeps_the_last_overlay_and_every_other_picture():
+    pictures = [(OVERLAY_CAPTION, "a"), ("Close-up of x", "b"), (OVERLAY_CAPTION, "c")]
+    assert latest_overlay_only(pictures) == [("Close-up of x", "b"), (OVERLAY_CAPTION, "c")]
+    closeups = [("Close-up of x", "a"), ("Close-up of y", "b")]
+    assert latest_overlay_only(closeups) == closeups and latest_overlay_only([]) == []
+
+
+def test_stop_level_flags_come_first_and_per_plant_checks_are_capped():
+    spots = [(x, y) for x in (40, 55, 70, 85) for y in (5, 35, 65)]  # 12 separate 6 px weeds, clear of the row
+    scene = {"row": rect(10, 0, 30, 100), **{f"w{n}": rect(x, y, x + 6, y + 6) for n, (x, y) in enumerate(spots)}}
+    crop = ToolCall("c1", "mark", {"kind": "crop", "boxes": [{"box": [100, 0, 300, 1000], "label": "soybean row"}]})
+    weeds = ToolCall("c2", "mark", {"kind": "weed", "boxes": [
+        {"box": [x * 10, y * 10, (x + 6) * 10, (y + 6) * 10], "label": "weed"} for x, y in spots]})
+    ids = [f"s0-i{n}" for n in range(2, 14)]
+    llm = FakeLlm([LlmTurn("r1", [SURVEY, crop, weeds], ""),
+                   LlmTurn("r2", [_classify(*ids, confidence="low"), *_close()], "")])
+    result, _ = _run(llm, sam=FakeSam(scene))
+    assert result.weed_count == 12 and MAX_CHECK_FLAGS == 10
+    assert result.flags == ["This photo looks like corn, not soybean",
+                            *[f"Check s0-i{n}: low confidence" for n in range(2, 12)],
+                            "…and 2 more plants to check"]
