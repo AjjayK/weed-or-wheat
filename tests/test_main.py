@@ -166,3 +166,8 @@ def test_unknown_walk_is_404_and_samples_listed(tmp_path):
     assert client.get("/walks/ffffffffffffffff/report").status_code == 404
     assert client.get("/walks/ffffffffffffffff/overlay/0.png").status_code == 404
     assert client.get("/samples").json()[0]["name"] == "Sample"
+
+
+def test_crop_menu_makes_the_farmer_choose(tmp_path):
+    html = _client(tmp_path).get("/").text
+    assert '<option value="" disabled selected>Choose the crop</option>' in html
