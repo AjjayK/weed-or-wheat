@@ -6,9 +6,9 @@ import pytest
 from PIL import Image
 
 from scout.agent.state import StopFailed, StopState
-from scout.agent.tools import TOOL_SCHEMAS, ToolRunner
+from scout.agent.tools import OVERLAY_CAPTION, TOOL_SCHEMAS, ToolRunner
 from scout.vision.sam_parse import SamRecord
-from tests.helpers import FakeSam, field_scene, make_image, mask_record, rect, small_weedbook
+from tests.helpers import FakeSam, field_photo, field_scene, make_image, mask_record, rect, small_weedbook
 
 # Boxes as the agent gives them, 0-1000; the test photo is 100x100, so pixels are a tenth of these.
 ROW, PLANT = [100, 0, 300, 1000], [400, 300, 520, 420]
@@ -17,8 +17,8 @@ ON_PLANT, IN_ROW = [420, 320, 500, 400], [120, 500, 220, 600]
 PATCH, BARE = [400, 750, 1000, 1000], [400, 500, 500, 600]
 
 
-def _runner(sam=None, max_calls=12):
-    state = StopState(make_image(100, 100), "soybean")
+def _runner(sam=None, max_calls=12, image=None):
+    state = StopState(image or make_image(100, 100), "soybean")
     return ToolRunner(state, sam or FakeSam(), small_weedbook(), max_calls=max_calls), state
 
 
@@ -27,8 +27,13 @@ def _mark(runner, kind, *boxes):
     return json.loads(runner.run("mark", {"kind": kind, "boxes": items}).output)
 
 
-def test_schemas_name_six_tools():
-    assert [t["name"] for t in TOOL_SCHEMAS] == ["segment", "mark", "zoom", "classify", "measure", "finish"]
+def test_schemas_name_seven_tools():
+    assert [t["name"] for t in TOOL_SCHEMAS] == ["survey", "segment", "mark", "zoom", "classify", "measure", "finish"]
+    schemas = {t["name"]: t["parameters"] for t in TOOL_SCHEMAS}
+    assert schemas["mark"]["properties"]["boxes"]["maxItems"] == 120
+    assert schemas["mark"]["properties"]["kind"]["enum"] == ["crop", "weed", "patch"]
+    assert "all_weeds_marked" in schemas["finish"]["required"]
+    assert schemas["survey"]["required"] == ["crop_seen", "weeds_visible"]
 
 
 def test_mark_sends_pixels_in_one_request_and_reports_thousandths():
@@ -70,16 +75,16 @@ def test_mark_rejects_bad_boxes_before_calling_sam():
     runner, _ = _runner(sam)
     one = [{"box": WEED_A, "label": "w"}]
     assert runner.run("mark", {"kind": "weed", "boxes": []}).output.startswith("error:")
-    assert runner.run("mark", {"kind": "weed", "boxes": one * 17}).output.startswith("error:")
+    assert runner.run("mark", {"kind": "weed", "boxes": one * 121}).output.startswith("error:")
     assert runner.run("mark", {"kind": "weed", "boxes": [{"box": [1, 2, 3], "label": "w"}]}).output.startswith("error:")
     assert runner.run("mark", {"kind": "weed", "boxes": [[600, 600, 700, 700]]}).output.startswith("error:")
     assert runner.run("mark", {"kind": "plant", "boxes": one}).output.startswith("error:")
     assert sam.calls == []
 
 
-def test_sixteen_weed_boxes_make_the_count_approximate():
+def test_a_full_mark_call_makes_the_count_a_floor():
     runner, state = _runner()
-    _mark(runner, "weed", WEED_A, *[BARE] * 15)
+    _mark(runner, "weed", WEED_A, *[BARE] * 119)
     assert state.box_cap_hit and len(state.unclassified()) == 1
     metrics = json.loads(runner.run("measure", {"view_type": "close_up"}).output)
     assert metrics["weed_count"] == 1 and metrics["count_approximate"] is True
@@ -215,3 +220,66 @@ def test_two_bad_requests_fail_the_stop():
     assert runner.run("mark", args).output.startswith("error:")
     with pytest.raises(StopFailed):
         runner.run("mark", args)
+
+
+def test_survey_stores_the_crop_seen_and_the_estimate():
+    runner, state = _runner()
+    assert json.loads(runner.run("survey", {"crop_seen": "corn", "weeds_visible": 52}).output) == {"ok": True}
+    assert (state.crop_seen, state.weeds_estimate) == ("corn", 52)
+    assert state.steps[-1].summary == "Survey: looks like corn, about 52 weeds"
+    runner.run("survey", {"crop_seen": "unsure", "weeds_visible": "3"})
+    assert (state.crop_seen, state.weeds_estimate) == ("unsure", 3)
+    assert state.steps[-1].summary == "Survey: crop unclear, about 3 weeds"
+    for bad in ({"crop_seen": "wheat", "weeds_visible": 1}, {"crop_seen": "corn", "weeds_visible": -1},
+                {"crop_seen": "corn", "weeds_visible": None}):
+        assert runner.run("survey", bad).output.startswith("error:")
+    assert (state.crop_seen, state.weeds_estimate) == ("unsure", 3)
+
+
+def test_mark_splits_many_boxes_into_requests_of_sixteen():
+    sam = FakeSam()
+    runner, state = _runner(sam)
+    out = _mark(runner, "weed", *[BARE] * 20, WEED_B, *[BARE] * 15)
+    assert sorted(len(boxes) for kind, boxes in sam.calls if kind == "boxes") == [4, 16, 16]
+    assert [(f["box_no"], f["box"]) for f in out["found"]] == [(21, WEED_B)]
+    assert out["notes"][0] == "box 1: nothing found" and out["notes"][-1] == "box 36: nothing found"
+    assert not state.box_cap_hit and state.steps[-1].summary == "Mark weed: 1 of 36 boxes kept"
+
+
+def test_mark_answers_with_counts_a_hint_and_a_picture():
+    runner, state = _runner()
+    runner.run("survey", {"crop_seen": "soybean", "weeds_visible": 2})
+    result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "waterhemp"}]})
+    out = json.loads(result.output)
+    assert out["weeds_marked"] == {"plants": 1, "patches": 0} and out["weeds_estimate"] == 2
+    assert out["hint"] == ("You estimated 2 weeds and have marked 1 plant and 0 patches. Mark the rest: more boxes, "
+                           "or kind patch where they are too dense.")
+    assert [caption for caption, _ in result.images] == [OVERLAY_CAPTION]
+    assert result.images[0][1].startswith("data:image/jpeg;base64,")
+    out = _mark(runner, "weed", WEED_B)
+    assert out["weeds_marked"] == {"plants": 2, "patches": 0} and "hint" not in out
+
+
+def test_patch_kind_measures_green_pixels_and_follows_the_crop():
+    sam = FakeSam(scene={"row": rect(10, 0, 30, 100), "leaf": rect(70, 60, 75, 80)})
+    runner, state = _runner(sam, image=field_photo())
+    _mark(runner, "crop", ROW)
+    out = _mark(runner, "patch", [500, 500, 900, 900], [50, 100, 350, 900], [350, 100, 550, 400])
+    assert [(f["box_no"], f["plants"], f["area_pct"]) for f in out["found"]] == [(1, 2, 2.0)]
+    assert out["notes"] == ["box 2: mostly crop: box the weeds between the rows, not the row",
+                            "box 3: no green weed pixels in this area"]
+    assert out["weeds_marked"] == {"plants": 0, "patches": 1}
+    assert state.steps[-1].summary == "Mark patch: 1 of 3 areas kept"
+    assert ("boxes", ((50, 50, 90, 90),)) not in sam.calls  # weed areas never go to SAM
+    _mark(runner, "crop", [700, 600, 750, 800])  # a crop leaf over the second shoot
+    area = state.instances[out["found"][0]["id"]]
+    assert area.area_px == 100 and area.plant_count == 1
+
+
+def test_finish_records_whether_every_weed_is_marked():
+    runner, state = _runner()
+    runner.run("measure", {"view_type": "close_up"})
+    assert runner.run("finish", {"crop_stage": None, "notes": "", "all_weeds_marked": False}).finished
+    assert state.all_weeds_marked is False
+    runner.run("finish", {"crop_stage": None, "notes": "", "all_weeds_marked": "yes"})
+    assert state.all_weeds_marked is None  # only a real true or false counts

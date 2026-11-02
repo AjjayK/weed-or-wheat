@@ -250,5 +250,5 @@ class StopState:
         weed = self.union_of(lambda i: i.role == "weed")
         crop = self.union_of(lambda i: i.role == "crop") & ~weed  # weeds win: a weed in the row keeps its pixels
         flagged = [i.box for i in self.instances.values() if i.role == "weed" and i.check_this]
-        areas = [self.patch_boxes[i.id] for i in self._weed_areas()]
+        areas = [i.box for i in self._weed_areas()]
         return render_overlay(self.image.work, crop, weed, self.row_band(), flagged, areas)

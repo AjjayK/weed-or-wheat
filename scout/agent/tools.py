@@ -1,9 +1,11 @@
-"""The six tools Muse Spark can call at a stop, and the code that runs them. Every box in or out is 0-1000."""
+"""The seven tools Muse Spark can call at a stop, and the code that runs them. Every box in or out is 0-1000."""
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
-from scout.agent.state import MAX_BOXES, StopFailed, StopState, to_pixels, to_thousandths
+from scout.agent.state import (MAX_BOXES, MAX_MARK_BOXES, UNMARKED_SHARE, StopFailed, StopState, to_pixels,
+                               to_thousandths)
 from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import to_data_url
 from scout.models import Instance
@@ -14,12 +16,17 @@ from scout.vision.sam_parse import SamRecord
 
 VIEW_TYPES = ("row", "top_down", "close_up", "wide")
 KINDS = ("crop", "weed")
+MARK_KINDS = ("crop", "weed", "patch")
+CROPS_SEEN = ("corn", "soybean", "alfalfa", "other", "unsure")
 CONFIDENCES = ("high", "medium", "low")
 ZOOM_MAX_PX = 768
 MAX_LISTED = 100
+SAM_WORKERS = 4  # SAM requests in flight per mark call
 NOTHING = "nothing found"
 MOSTLY_CROP_NOTE = "mostly crop"
 PATCH_NOTE = "large patch; counted as one, approximate"
+OVERLAY_CAPTION = ("What is marked now: green is crop, magenta is weed, blue boxes are weed areas, "
+                   "yellow boxes need a check")
 
 
 def _number(value, name: str) -> float | None:
@@ -45,16 +52,24 @@ _BOX = {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems"
         "description": "[x1, y1, x2, y2] from 0 to 1000: x from the left edge, y from the top edge"}
 
 TOOL_SCHEMAS = [
+    _fn("survey", "Look over the photo first: the crop you see, and how many weed plants are visible.",
+        {"crop_seen": {"type": "string", "enum": list(CROPS_SEEN)},
+         "weeds_visible": {"type": "integer", "minimum": 0,
+                           "description": "Your estimate of separate weed plants visible, small ones included"}},
+        ["crop_seen", "weeds_visible"]),
     _fn("segment", "Ask SAM 3.1 for every instance of one concept, a short noun phrase. It finds \"crop row\" "
         "(kind crop) and distinct things such as \"dandelion\" or \"yellow flower\" (kind weed). It does not find crop "
         "plants, leaves, or weeds in general: use mark for those.",
         {"phrase": {"type": "string"}, "kind": {"type": "string", "enum": list(KINDS)}},
         ["phrase", "kind"]),
-    _fn("mark", "Segment plants you can see, one box per plant; all boxes go to SAM 3.1 in one request.",
-        {"kind": {"type": "string", "enum": list(KINDS),
+    _fn("mark", "Mark what you see with boxes. crop and weed boxes go to SAM 3.1, any number (code splits them into "
+        "requests of 16). patch boxes are areas of weeds too dense or small to box one by one; code measures them as "
+        "green pixels that are not crop. The answer comes with a picture of everything marked so far.",
+        {"kind": {"type": "string", "enum": list(MARK_KINDS),
                   "description": "crop: boxes around crop rows or crop plants (one tall box per visible row is "
-                                 "fine). weed: a tight box around each weed, one per plant."},
-         "boxes": {"type": "array", "minItems": 1, "maxItems": MAX_BOXES, "items": {
+                                 "fine). weed: a tight box around each weed, one per plant. patch: a box around an "
+                                 "area of dense or tiny weeds, with as little crop as possible."},
+         "boxes": {"type": "array", "minItems": 1, "maxItems": MAX_MARK_BOXES, "items": {
              "type": "object",
              "properties": {"box": _BOX, "label": {"type": "string", "description": "What it is, in 2-3 words"}},
              "required": ["box", "label"], "additionalProperties": False}}},
@@ -75,8 +90,10 @@ TOOL_SCHEMAS = [
         {"view_type": {"type": "string", "enum": list(VIEW_TYPES)}}, ["view_type"]),
     _fn("finish", "Close this stop after measure.",
         {"crop_stage": {"type": ["string", "null"], "description": "Crop growth stage such as V3, or null"},
-         "notes": {"type": "string"}},
-        ["crop_stage", "notes"]),
+         "notes": {"type": "string"},
+         "all_weeds_marked": {"type": "boolean",
+                              "description": "true only if every weed you can see is marked, as boxes or areas"}},
+        ["crop_stage", "notes", "all_weeds_marked"]),
 ]
 
 
@@ -133,6 +150,65 @@ class ToolRunner:
             return None, MOSTLY_CROP_NOTE
         return inst, PATCH_NOTE if self.state.is_patch(inst) else None
 
+    def _sam_boxes(self, pixel_boxes: list) -> dict[str, SamRecord]:
+        """Every box to SAM in requests of at most 16, sent in parallel. Keys are box numbers from 1."""
+        starts = list(range(0, len(pixel_boxes), MAX_BOXES))
+        chunks = [pixel_boxes[start:start + MAX_BOXES] for start in starts]
+        with ThreadPoolExecutor(max_workers=min(SAM_WORKERS, len(chunks))) as pool:
+            answers = list(pool.map(lambda chunk: self.sam.segment_boxes(self.state.image, chunk), chunks))
+        records: dict[str, SamRecord] = {}
+        unexpected = []
+        for start, chunk, answer in zip(starts, chunks, answers):
+            for record in answer:  # object i + 1 is the chunk's box i
+                n = int(record.object_id) if str(record.object_id).isdigit() else 0
+                if 1 <= n <= len(chunk):
+                    records.setdefault(str(start + n), record)
+                else:
+                    unexpected.append(record.object_id)
+        if unexpected:
+            self.state.log("mark", f"SAM returned unexpected object ids {unexpected[:5]}", ok=False)
+        return records
+
+    def _feedback(self, out: dict) -> ToolResult:
+        """Counts against the survey estimate, a hint when marking is short of it, and a picture of the marks."""
+        plants, areas = self.state.weeds_marked()
+        out["weeds_marked"] = {"plants": plants, "patches": areas}
+        estimate = self.state.weeds_estimate
+        if estimate is not None:
+            out["weeds_estimate"] = estimate
+            if self.state.plants_marked() < UNMARKED_SHARE * estimate:
+                out["hint"] = (f"You estimated {estimate} weeds and have marked "
+                               f"{plants} plant{'' if plants == 1 else 's'} and "
+                               f"{areas} patch{'' if areas == 1 else 'es'}. Mark the rest: more boxes, or kind "
+                               "patch where they are too dense.")
+        try:
+            images = [(OVERLAY_CAPTION, to_data_url(self.state.overlay()))]
+        except Exception:  # the picture helps the agent check its work; the counts above still stand without it
+            images = []
+        return ToolResult(json.dumps(out), images=images)
+
+    def _mark_patches(self, pixel_boxes: list, labels: list[str]) -> ToolResult:
+        found, notes = [], []
+        for n, (box, label) in enumerate(zip(pixel_boxes, labels), start=1):
+            inst, note = self.state.add_patch(box, label)
+            if inst is not None:
+                found.append({"box_no": n, **self._brief(inst), "plants": inst.plant_count})
+            if note:
+                notes.append(f"box {n}: {note}")
+        self.state.log("mark", f"Mark patch: {len(found)} of {len(pixel_boxes)} areas kept", [f["id"] for f in found])
+        return self._feedback({"found": found, "notes": notes})
+
+    def _tool_survey(self, crop_seen: str, weeds_visible) -> ToolResult:
+        if crop_seen not in CROPS_SEEN:
+            raise ValueError(f"crop_seen must be one of {list(CROPS_SEEN)}")
+        count = _number(weeds_visible, "weeds_visible")
+        if count is None:
+            raise ValueError("weeds_visible must be a number")
+        self.state.crop_seen, self.state.weeds_estimate = crop_seen, int(count)
+        look = "crop unclear" if crop_seen == "unsure" else f"looks like {crop_seen}"
+        self.state.log("survey", f"Survey: {look}, about {int(count)} weeds")
+        return ToolResult(json.dumps({"ok": True}))
+
     def _tool_segment(self, phrase: str, kind: str) -> ToolResult:
         if kind not in KINDS:
             raise ValueError(f"kind must be one of {list(KINDS)}")
@@ -150,24 +226,22 @@ class ToolRunner:
         summary = f'Segment "{phrase}": {len(found)} found'
         if dropped:
             summary += f", {dropped} dropped as crop"
+        if kind == "crop":
+            self.state.refresh_patches()
         self.state.log("segment", summary, [i.id for i in found])
         return ToolResult(json.dumps({"total_found": len(found), "found": [self._brief(i) for i in found[:MAX_LISTED]],
                                       "notes": notes[:MAX_LISTED]}))
 
     def _tool_mark(self, kind: str, boxes: list[dict]) -> ToolResult:
-        if kind not in KINDS:
-            raise ValueError(f"kind must be one of {list(KINDS)}")
-        if not isinstance(boxes, list) or not 1 <= len(boxes) <= MAX_BOXES:
-            raise ValueError(f"give 1 to {MAX_BOXES} boxes")
+        if kind not in MARK_KINDS:
+            raise ValueError(f"kind must be one of {list(MARK_KINDS)}")
+        if not isinstance(boxes, list) or not 1 <= len(boxes) <= MAX_MARK_BOXES:
+            raise ValueError(f"give 1 to {MAX_MARK_BOXES} boxes")
         pixel_boxes = [to_pixels(item["box"], self.state.size) for item in boxes]
         labels = [str(item.get("label") or kind).strip() for item in boxes]
-        records: dict[str, SamRecord] = {}
-        for record in self.sam.segment_boxes(self.state.image, pixel_boxes):
-            records.setdefault(record.object_id, record)  # object i + 1 is box i
-        asked = {str(n) for n in range(1, len(boxes) + 1)}
-        unexpected = [object_id for object_id in records if object_id not in asked]
-        if unexpected:
-            self.state.log("mark", f"SAM returned unexpected object ids {unexpected[:5]}", ok=False)
+        if kind == "patch":
+            return self._mark_patches(pixel_boxes, labels)
+        records = self._sam_boxes(pixel_boxes)
         found, notes = [], []
         for n, label in enumerate(labels, start=1):
             record = records.get(str(n))
@@ -176,10 +250,12 @@ class ToolRunner:
                 found.append({"box_no": n, **self._brief(inst)})
             if note:
                 notes.append(f"box {n}: {note}")
-        if kind == "weed" and len(boxes) == MAX_BOXES:
+        if kind == "weed" and len(boxes) == MAX_MARK_BOXES:
             self.state.box_cap_hit = True  # more weeds may be out there: the count becomes a floor
+        if kind == "crop":
+            self.state.refresh_patches()
         self.state.log("mark", f"Mark {kind}: {len(found)} of {len(boxes)} boxes kept", [f["id"] for f in found])
-        return ToolResult(json.dumps({"found": found, "notes": notes}))
+        return self._feedback({"found": found, "notes": notes})
 
     def _tool_zoom(self, instance_id: str | None = None, box: list[int] | None = None) -> ToolResult:
         if instance_id:
@@ -235,6 +311,7 @@ class ToolRunner:
         else:
             summary = f"Classified {len(resolved)} plants ({len(weeds)} weeds)"
         ids = [inst.id for inst, *_ in resolved]
+        self.state.refresh_patches()  # an instance reclassified as crop changes what weed areas leave out
         self.state.log("classify", summary, ids)
         return ToolResult(json.dumps({"ok": ids}))
 
@@ -251,7 +328,7 @@ class ToolRunner:
         self.state.log("measure", f"Measure: weed cover {metrics.weed_cover_pct}%, {metrics.weed_count} weeds")
         return ToolResult(json.dumps(out))
 
-    def _tool_finish(self, crop_stage: str | None, notes: str) -> ToolResult:
+    def _tool_finish(self, crop_stage: str | None, notes: str, all_weeds_marked=None) -> ToolResult:
         unclassified = self.state.unclassified()
         if unclassified and self.state.calls < self.max_calls:
             self.state.log("finish", "Refused: unclassified weeds remain", ok=False)
@@ -261,6 +338,7 @@ class ToolRunner:
             return ToolResult("error: call measure first")
         self.state.crop_stage = None if crop_stage is None else (str(crop_stage).strip() or None)
         self.state.notes = str(notes or "")
+        self.state.all_weeds_marked = all_weeds_marked if isinstance(all_weeds_marked, bool) else None
         self.state.finished = True
         self.state.log("finish", "Stop closed")
         return ToolResult("ok", finished=True)
