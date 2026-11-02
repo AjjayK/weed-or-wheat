@@ -15,7 +15,7 @@ Crop = Literal["corn", "soybean", "alfalfa"]
 
 class Instance(BaseModel):
     id: str
-    source: Literal["concept", "prompt", "candidate"]
+    source: Literal["concept", "prompt", "candidate", "patch"]  # patch: a weed area measured from green pixels
     prompt: str
     box: Box
     sam_confidence: float | None = None
@@ -26,6 +26,7 @@ class Instance(BaseModel):
     leaf_count: int | None = None
     id_confidence: Literal["high", "medium", "low"] | None = None
     check_this: bool = False
+    plant_count: int = 1  # a weed area holds several plants: its separate green pieces
 
 
 class AgentStep(BaseModel):
@@ -55,6 +56,7 @@ class StopResult(BaseModel):
     max_height_in: float | None = None
     flags: list[str] = Field(default_factory=list)
     notes: str = ""
+    crop_seen: str | None = None  # the crop the agent saw: corn, soybean, alfalfa, other or unsure
     steps: list[AgentStep] = Field(default_factory=list)
     status: Literal["ok", "no_crop_found", "failed"] = "ok"
 
@@ -108,3 +110,4 @@ class FieldReport(BaseModel):
     rule_trace: list[str]
     explanation: str
     options: list[LabelOption]
+    crop_mismatch: str | None = None  # a warning when photos show another crop than the walk was scouted as
