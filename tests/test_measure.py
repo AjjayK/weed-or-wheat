@@ -147,4 +147,15 @@ def test_a_weed_area_counts_only_the_pieces_no_box_already_counted():
     m = compute_metrics([box, area], masks, SIZE, "close_up")
     assert m.weed_count == 5 and m.weed_cover_pct == 9.0  # 1 boxed plant + 10 pieces x 360 of 900 px not yet counted
     m = compute_metrics([area, box], masks, SIZE, "close_up")
-    assert m.weed_count == 10 and m.weed_cover_pct == 9.0  # the box lies wholly inside the area: nothing new
+    assert m.weed_count == 5 and m.weed_cover_pct == 9.0  # order no longer matters: the box is measured first
+
+
+def test_a_boxed_weed_inside_a_weed_area_keeps_its_species_and_height_in_any_order():
+    ragweed = Instance(id="b", source="prompt", prompt="giant ragweed", box=(40, 40, 58, 70), area_px=540,
+                       role="weed", species_id="giant_ragweed", height_in=30.0)
+    area = Instance(id="p", source="patch", prompt="horsetail", box=(40, 40, 70, 70), area_px=900, role="weed",
+                    species_id="field_horsetail", plant_count=10)
+    masks = {"b": _mask((40, 40, 58, 70)), "p": _mask((40, 40, 70, 70))}
+    for order in ([ragweed, area], [area, ragweed]):
+        m = compute_metrics(order, masks, SIZE, "close_up")
+        assert m.species == {"giant_ragweed": 1, "field_horsetail": 4} and m.max_height_in == 30.0
