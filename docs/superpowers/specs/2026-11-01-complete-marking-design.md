@@ -54,8 +54,8 @@ The handler stores both on `StopState` (`crop_seen`, `weeds_estimate`) and logs 
 weeds`. Calling it again overwrites the values.
 
 **`mark` without the 16 cap.** `boxes` takes up to `MAX_MARK_BOXES = 120`. The handler splits the boxes into chunks of
-at most `MAX_BOXES = 16` (SAM's limit, unchanged in `SamClient.segment_boxes`) and sends the chunks in parallel (a
-thread pool of up to 8). Results are registered in box order, so instance ids stay stable. `box_cap_hit` is set when
+at most `MAX_BOXES = 16` (SAM's limit, unchanged in `SamClient.segment_boxes`) and sends the chunks in parallel (up to 4
+at a time per stop; with 10 stops running, that is at most 40 SAM requests in flight). Results are registered in box order, so instance ids stay stable. `box_cap_hit` is set when
 a call uses all 120, and its flag reads "Weed count is a floor: a mark call used all 120 boxes".
 
 **New mark kind `patch`**: a box around an area where weeds are too dense or too small to box one by one. Patches go
@@ -103,8 +103,9 @@ patch  = patch without connected pieces under MIN_PIECE_PX (20 px)
 Soil, residue and shadow are not green, so they never count.
 
 **Recomputed when crop changes.** A patch keeps its box. `StopState.refresh_patches()` recomputes every patch mask
-after any crop mark, so boxing a crossing leaf as crop removes it from the patch at once. `Instance.area_px` and
-`box` are updated with the mask.
+after any crop mark, crop segment or classify, so boxing a crossing leaf as crop removes it from the patch at once.
+`Instance.area_px` and `plant_count` are updated with the mask; `Instance.box` stays the box the agent drew, so a
+zoom shows the whole area. A patch whose box holds no green pixels is refused: "no green weed pixels in this area".
 
 **Mostly-crop patches are refused.** If more than `PATCH_BOX_MOSTLY_CROP = 0.5` of the patch box is crop, no
 instance is made and the agent is told: "patch N is mostly crop: box the weeds between the rows, not the row".
@@ -142,8 +143,9 @@ overlay in the report both use it. The report legend adds "Blue box: weed area m
 
 ## Error handling
 
-- A SAM chunk that fails follows the existing paths: a `BadRequest` is reported to the agent and counted toward the
-  "rejected twice" stop failure; retries for 429 and 5xx are unchanged. Chunks that succeeded are still registered.
+- A SAM chunk that fails fails the whole mark call, on the existing paths: a `BadRequest` is reported to the agent
+  and counted toward the "rejected twice" stop failure; retries for 429 and 5xx are unchanged. Nothing from that call
+  is registered, so the agent can simply send it again.
 - `survey` with an unknown `crop_seen` or a negative `weeds_visible` is rejected like any invalid tool call.
 - A stop that ends at a limit without `survey` or `finish` has no estimate or `all_weeds_marked`: the unmarked flag
   is decided from what exists (no estimate means only the `all_weeds_marked` trigger applies, and a missing
