@@ -1,5 +1,6 @@
 """The seven tools Muse Spark can call at a stop, and the code that runs them. Every box in or out is 0-1000."""
 import json
+import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -14,6 +15,8 @@ from scout.vision import masks as mk
 from scout.vision.measure import compute_metrics
 from scout.vision.sam_parse import SamRecord
 
+log = logging.getLogger(__name__)
+
 VIEW_TYPES = ("row", "top_down", "close_up", "wide")
 KINDS = ("crop", "weed")
 MARK_KINDS = ("crop", "weed", "patch")
@@ -22,11 +25,13 @@ CONFIDENCES = ("high", "medium", "low")
 ZOOM_MAX_PX = 768
 MAX_LISTED = 100
 SAM_WORKERS = 4  # SAM requests in flight per mark call
+MAX_ESTIMATE = 1000  # the survey's weed estimate is capped here
+OVERLAY_QUALITY = 80  # JPEG quality of the picture sent back after a mark
 NOTHING = "nothing found"
 MOSTLY_CROP_NOTE = "mostly crop"
 PATCH_NOTE = "large patch; counted as one, approximate"
-OVERLAY_CAPTION = ("What is marked now: green is crop, magenta is weed, blue boxes are weed areas, "
-                   "yellow boxes need a check")
+OVERLAY_CAPTION = ("What is marked now: green is crop, magenta is weed, gray is the in-row zone, "
+                   "blue boxes are weed areas, yellow boxes need a check")
 
 
 def _number(value, name: str) -> float | None:
@@ -40,6 +45,21 @@ def _number(value, name: str) -> float | None:
     if not math.isfinite(number) or number < 0:
         raise ValueError(f"{name} must be a number or null, got {value!r}")
     return number
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def _is_box_item(item) -> bool:
+    """A mark item is a dict whose "box" is a list of four finite numbers (numeric strings like "600" are fine)."""
+    box = item.get("box") if isinstance(item, dict) else None
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return False
+    try:
+        return all(not isinstance(v, bool) and math.isfinite(float(v)) for v in box)
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -62,9 +82,10 @@ TOOL_SCHEMAS = [
         "plants, leaves, or weeds in general: use mark for those.",
         {"phrase": {"type": "string"}, "kind": {"type": "string", "enum": list(KINDS)}},
         ["phrase", "kind"]),
-    _fn("mark", "Mark what you see with boxes. crop and weed boxes go to SAM 3.1, any number (code splits them into "
-        "requests of 16). patch boxes are areas of weeds too dense or small to box one by one; code measures them as "
-        "green pixels that are not crop. The answer comes with a picture of everything marked so far.",
+    _fn("mark", "Mark what you see with boxes. crop and weed boxes go to SAM 3.1, up to 120 per call; call again for "
+        "more (code splits them into requests of 16). patch boxes are areas of weeds too dense or small to box one by "
+        "one; code measures them as green pixels that are not crop. The answer comes with a picture of everything "
+        "marked so far.",
         {"kind": {"type": "string", "enum": list(MARK_KINDS),
                   "description": "crop: boxes around crop rows or crop plants (one tall box per visible row is "
                                  "fine). weed: a tight box around each weed, one per plant. patch: a box around an "
@@ -154,13 +175,20 @@ class ToolRunner:
         """Every box to SAM in requests of at most 16, sent in parallel. Keys are box numbers from 1."""
         starts = list(range(0, len(pixel_boxes), MAX_BOXES))
         chunks = [pixel_boxes[start:start + MAX_BOXES] for start in starts]
+
+        def ask(start: int, chunk: list) -> list[SamRecord]:
+            try:
+                return self.sam.segment_boxes(self.state.image, chunk)
+            except BadRequest as error:  # say which boxes, so the agent can fix and resend just those
+                raise BadRequest(f"boxes {start + 1}-{start + len(chunk)}: {error}") from error
+
         with ThreadPoolExecutor(max_workers=min(SAM_WORKERS, len(chunks))) as pool:
-            answers = list(pool.map(lambda chunk: self.sam.segment_boxes(self.state.image, chunk), chunks))
+            answers = list(pool.map(ask, starts, chunks))
         records: dict[str, SamRecord] = {}
         unexpected = []
         for start, chunk, answer in zip(starts, chunks, answers):
             for record in answer:  # object i + 1 is the chunk's box i
-                n = int(record.object_id) if str(record.object_id).isdigit() else 0
+                n = int(record.object_id) if str(record.object_id).isdecimal() else 0
                 if 1 <= n <= len(chunk):
                     records.setdefault(str(start + n), record)
                 else:
@@ -169,21 +197,25 @@ class ToolRunner:
             self.state.log("mark", f"SAM returned unexpected object ids {unexpected[:5]}", ok=False)
         return records
 
-    def _feedback(self, out: dict) -> ToolResult:
-        """Counts against the survey estimate, a hint when marking is short of it, and a picture of the marks."""
+    def _feedback(self, out: dict, kind: str) -> ToolResult:
+        """Counts against the survey estimate, a hint when weed marks fall short of it, and a picture of the marks."""
         plants, areas = self.state.weeds_marked()
         out["weeds_marked"] = {"plants": plants, "patches": areas}
         estimate = self.state.weeds_estimate
         if estimate is not None:
             out["weeds_estimate"] = estimate
-            if self.state.plants_marked() < UNMARKED_SHARE * estimate:
-                out["hint"] = (f"You estimated {estimate} weeds and have marked "
-                               f"{plants} plant{'' if plants == 1 else 's'} and "
-                               f"{areas} patch{'' if areas == 1 else 'es'}. Mark the rest: more boxes, or kind "
-                               "patch where they are too dense.")
+            counted = self.state.plants_marked()  # boxed plants plus the pieces inside weed areas
+            if kind != "crop" and counted < UNMARKED_SHARE * estimate:
+                parts = _plural(plants, "boxed plant")
+                if areas:
+                    parts += f" and {_plural(areas, 'weed area')} holding about {counted - plants}"
+                out["hint"] = (f"You estimated {estimate} weeds; your marks count as about {counted}: {parts}. "
+                               "Mark the rest: more boxes, or kind patch where they are too dense.")
         try:
-            images = [(OVERLAY_CAPTION, to_data_url(self.state.overlay()))]
+            images = [(OVERLAY_CAPTION, to_data_url(self.state.overlay(), quality=OVERLAY_QUALITY))]
         except Exception:  # the picture helps the agent check its work; the counts above still stand without it
+            log.warning("overlay picture failed", exc_info=True)
+            out["picture"] = "unavailable"
             images = []
         return ToolResult(json.dumps(out), images=images)
 
@@ -196,7 +228,7 @@ class ToolRunner:
             if note:
                 notes.append(f"box {n}: {note}")
         self.state.log("mark", f"Mark patch: {len(found)} of {len(pixel_boxes)} areas kept", [f["id"] for f in found])
-        return self._feedback({"found": found, "notes": notes})
+        return self._feedback({"found": found, "notes": notes}, "patch")
 
     def _tool_survey(self, crop_seen: str, weeds_visible) -> ToolResult:
         if crop_seen not in CROPS_SEEN:
@@ -204,9 +236,10 @@ class ToolRunner:
         count = _number(weeds_visible, "weeds_visible")
         if count is None:
             raise ValueError("weeds_visible must be a number")
-        self.state.crop_seen, self.state.weeds_estimate = crop_seen, int(count)
+        estimate = min(round(count), MAX_ESTIMATE)
+        self.state.crop_seen, self.state.weeds_estimate = crop_seen, estimate
         look = "crop unclear" if crop_seen == "unsure" else f"looks like {crop_seen}"
-        self.state.log("survey", f"Survey: {look}, about {int(count)} weeds")
+        self.state.log("survey", f"Survey: {look}, about {estimate} weeds")
         return ToolResult(json.dumps({"ok": True}))
 
     def _tool_segment(self, phrase: str, kind: str) -> ToolResult:
@@ -237,6 +270,9 @@ class ToolRunner:
             raise ValueError(f"kind must be one of {list(MARK_KINDS)}")
         if not isinstance(boxes, list) or not 1 <= len(boxes) <= MAX_MARK_BOXES:
             raise ValueError(f"give 1 to {MAX_MARK_BOXES} boxes")
+        for n, item in enumerate(boxes, start=1):
+            if not _is_box_item(item):
+                raise ValueError(f"box {n}: needs a box of four numbers and a label")
         pixel_boxes = [to_pixels(item["box"], self.state.size) for item in boxes]
         labels = [str(item.get("label") or kind).strip() for item in boxes]
         if kind == "patch":
@@ -255,7 +291,7 @@ class ToolRunner:
         if kind == "crop":
             self.state.refresh_patches()
         self.state.log("mark", f"Mark {kind}: {len(found)} of {len(boxes)} boxes kept", [f["id"] for f in found])
-        return self._feedback({"found": found, "notes": notes})
+        return self._feedback({"found": found, "notes": notes}, kind)
 
     def _tool_zoom(self, instance_id: str | None = None, box: list[int] | None = None) -> ToolResult:
         if instance_id:

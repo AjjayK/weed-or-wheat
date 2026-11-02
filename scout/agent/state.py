@@ -73,7 +73,7 @@ class StopState:
         self.steps: list[AgentStep] = []
         self.calls = 0
         self.bad_requests: dict[str, int] = {}
-        self.box_cap_hit = False  # a weed mark used all 16 boxes, so the weed count is a floor
+        self.box_cap_hit = False  # a weed mark used all MAX_MARK_BOXES, so the weed count is a floor
         self.patch_boxes: dict[str, Box] = {}  # weed areas the agent drew; their masks follow the crop
         self.crop_seen: str | None = None  # from survey
         self.weeds_estimate: int | None = None  # from survey: weed plants the agent sees

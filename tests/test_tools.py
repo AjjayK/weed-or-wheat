@@ -1,12 +1,14 @@
 import base64
 import io
 import json
+import logging
 
 import pytest
 from PIL import Image
 
 from scout.agent.state import StopFailed, StopState
 from scout.agent.tools import OVERLAY_CAPTION, TOOL_SCHEMAS, ToolRunner
+from scout.retry import BadRequest
 from scout.vision.sam_parse import SamRecord
 from tests.helpers import FakeSam, field_photo, field_scene, make_image, mask_record, rect, small_weedbook
 
@@ -252,8 +254,8 @@ def test_mark_answers_with_counts_a_hint_and_a_picture():
     result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "waterhemp"}]})
     out = json.loads(result.output)
     assert out["weeds_marked"] == {"plants": 1, "patches": 0} and out["weeds_estimate"] == 2
-    assert out["hint"] == ("You estimated 2 weeds and have marked 1 plant and 0 patches. Mark the rest: more boxes, "
-                           "or kind patch where they are too dense.")
+    assert out["hint"] == ("You estimated 2 weeds; your marks count as about 1: 1 boxed plant. Mark the rest: more "
+                           "boxes, or kind patch where they are too dense.")
     assert [caption for caption, _ in result.images] == [OVERLAY_CAPTION]
     assert result.images[0][1].startswith("data:image/jpeg;base64,")
     out = _mark(runner, "weed", WEED_B)
@@ -283,3 +285,95 @@ def test_finish_records_whether_every_weed_is_marked():
     assert state.all_weeds_marked is False
     runner.run("finish", {"crop_stage": None, "notes": "", "all_weeds_marked": "yes"})
     assert state.all_weeds_marked is None  # only a real true or false counts
+
+
+def test_the_hint_counts_weed_area_pieces_and_says_so():
+    runner, state = _runner(FakeSam(scene={"row": rect(10, 0, 30, 100)}), image=field_photo())
+    _mark(runner, "crop", ROW)
+    runner.run("survey", {"crop_seen": "soybean", "weeds_visible": 10})
+    out = _mark(runner, "patch", [500, 500, 900, 900])
+    assert out["weeds_marked"] == {"plants": 0, "patches": 1}
+    assert out["hint"] == ("You estimated 10 weeds; your marks count as about 2: 0 boxed plants and 1 weed area "
+                           "holding about 2. Mark the rest: more boxes, or kind patch where they are too dense.")
+
+
+def test_a_crop_mark_never_gets_the_weed_hint():
+    runner, state = _runner(FakeSam(scene={"row": rect(10, 0, 30, 100)}), image=field_photo())
+    runner.run("survey", {"crop_seen": "soybean", "weeds_visible": 10})
+    out = _mark(runner, "crop", ROW)
+    assert "hint" not in out and out["weeds_estimate"] == 10
+    assert out["weeds_marked"] == {"plants": 0, "patches": 0}
+
+
+def test_a_failed_overlay_leaves_a_warning_and_a_note_but_the_counts_stand(monkeypatch, caplog):
+    runner, state = _runner()
+
+    def broken():
+        raise RuntimeError("no picture today")
+
+    monkeypatch.setattr(state, "overlay", broken)
+    with caplog.at_level(logging.WARNING, logger="scout.agent.tools"):
+        result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "waterhemp"}]})
+    out = json.loads(result.output)
+    assert out["picture"] == "unavailable" and out["weeds_marked"] == {"plants": 1, "patches": 0}
+    assert result.images == []
+    assert [r.getMessage() for r in caplog.records] == ["overlay picture failed"]
+    assert caplog.records[0].exc_info is not None
+
+
+def test_a_picture_that_works_has_no_unavailable_note():
+    runner, _ = _runner()
+    result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "waterhemp"}]})
+    assert "picture" not in json.loads(result.output) and len(result.images) == 1
+
+
+class _SecondChunkFails(FakeSam):
+    """Rejects the 4-box request, which is the second chunk of a 20-box call."""
+
+    def segment_boxes(self, image, boxes):
+        if len(boxes) == 4:
+            self.calls.append(("boxes", tuple(boxes)))
+            raise BadRequest("too many masks")
+        return super().segment_boxes(image, boxes)
+
+
+def test_a_rejected_chunk_names_its_boxes_and_registers_nothing():
+    runner, state = _runner(_SecondChunkFails())
+    items = [{"box": box, "label": "w"} for box in [WEED_A, WEED_B, *[BARE] * 18]]
+    result = runner.run("mark", {"kind": "weed", "boxes": items})
+    assert result.output == "error: SAM rejected the request: boxes 17-20: too many masks"
+    assert state.instances == {} and state.bad_requests["mark"] == 1
+    assert result.images == []
+
+
+def test_mark_names_the_box_that_is_malformed():
+    sam = FakeSam()
+    runner, _ = _runner(sam)
+    good = {"box": WEED_A, "label": "w"}
+    for n, bad in ((2, {"label": "w"}), (2, [600, 600, 700, 700]), (2, {"box": [1, 2, 3], "label": "w"}),
+                   (2, {"box": [1, 2, 3, "x"], "label": "w"}), (2, {"box": [1, 2, 3, None], "label": "w"}),
+                   (2, {"box": [1, 2, 3, True], "label": "w"}), (2, {"box": "600,600,700,700", "label": "w"}),
+                   (2, {"box": [1, 2, 3, float("nan")], "label": "w"})):
+        out = runner.run("mark", {"kind": "weed", "boxes": [good, bad]}).output
+        assert out == f"error: box {n}: needs a box of four numbers and a label", bad
+    assert sam.calls == []
+
+
+def test_survey_rounds_the_estimate_and_caps_it():
+    runner, state = _runner()
+    runner.run("survey", {"crop_seen": "corn", "weeds_visible": 3.6})
+    assert state.weeds_estimate == 4
+    runner.run("survey", {"crop_seen": "corn", "weeds_visible": "5000"})
+    assert state.weeds_estimate == 1000 and state.steps[-1].summary == "Survey: looks like corn, about 1000 weeds"
+    assert runner.run("survey", {"crop_seen": "corn", "weeds_visible": None}).output == (
+        "error: weeds_visible must be a number")
+
+
+def test_the_overlay_picture_is_a_smaller_jpeg_and_explains_the_gray_zone(monkeypatch):
+    runner, _ = _runner()
+    qualities = []
+    monkeypatch.setattr("scout.agent.tools.to_data_url",
+                        lambda image, quality=90: qualities.append(quality) or "data:image/jpeg;base64,")
+    result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "waterhemp"}]})
+    assert qualities == [80] and result.images == [(OVERLAY_CAPTION, "data:image/jpeg;base64,")]
+    assert "magenta is weed, gray is the in-row zone, blue boxes" in OVERLAY_CAPTION
