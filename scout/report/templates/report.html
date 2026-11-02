@@ -16,6 +16,7 @@
   .stops { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
   .stops img { width: 100%; border-radius: 8px; }
   .flag { color: #a32d2d; font-size: 13px; }
+  .warning { background: #fdecc8; border: 1px solid #e0a43a; border-radius: 10px; padding: 12px; font-weight: 600; }
   .muted { color: #6b6a63; font-size: 13px; }
   .table-wrap { overflow-x: auto; }
   @media print { .noprint { display: none; } }
@@ -25,6 +26,7 @@
 <main>
 <p class="noprint"><a href="/">New walk</a> · <a href="stops.csv">Download CSV</a> · <a href="#" onclick="window.print(); return false;">Save as PDF</a></p>
 <h1>Scouting report: {{ report.crop }}, {{ report.stops|length }} stops</h1>
+{% if report.crop_mismatch %}<p class="warning">{{ report.crop_mismatch }}</p>{% endif %}
 <div class="cards">
   <div class="card">Mean weed cover<b>{{ "%.1f"|format(mean_cover) }}%</b></div>
   <div class="card">Density<b>{{ density_text }}</b></div>
@@ -88,7 +90,7 @@
 {% endif %}
 
 <h2>Stops</h2>
-<p>Green: crop · Magenta: weeds · Gray: in-row zone · Yellow box: check this plant</p>
+<p>Green: crop · Magenta: weeds · Gray: in-row zone · Blue box: weed area measured by green pixels · Yellow box: check this plant</p>
 <div class="stops">
 {% for s in report.stops %}
   <div class="card">

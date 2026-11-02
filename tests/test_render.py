@@ -92,3 +92,14 @@ def test_csv_leaves_a_failed_stops_numbers_blank():
     report = _with_stops(StopResult(stop_index=2, image_hash="c", status="failed",
                                     flags=["This stop could not be analyzed"]))
     assert report_csv(report).strip().splitlines()[-1] == "3,failed,,,,,,,,,,This stop could not be analyzed"
+
+
+def test_crop_mismatch_banner_comes_before_the_decision():
+    warning = "1 of 1 photos looks like corn, but this walk was scouted as soybean."
+    html = _html(_report().model_copy(update={"crop_mismatch": warning}))
+    assert warning in html and html.index(warning) < html.index("Decision")
+    assert "looks like corn" not in _html(_report())
+
+
+def test_legend_explains_blue_weed_areas():
+    assert "Blue box: weed area measured by green pixels" in _html(_report())

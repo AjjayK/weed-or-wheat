@@ -1,4 +1,4 @@
-from scout.agent.field_agent import build_report, numbers_ok
+from scout.agent.field_agent import build_report, crop_mismatch, numbers_ok
 from scout.agent.llm import LlmTurn
 from scout.agronomy.weeds import WeedBook, WeedInfo
 from scout.models import StopResult, UseRecord
@@ -65,3 +65,26 @@ def test_one_product_listed_for_each_treated_weed_and_unidentified_asks_for_an_i
     assert [(o.record.reg_no, o.record.species_id) for o in report.options] == [("100-1", "velvetleaf"), ("100-1", "waterhemp")]
     assert any(line.startswith("Identify the unidentified broadleaf") for line in report.rule_trace)
     assert not any("covers unidentified" in line for line in report.rule_trace)
+
+
+def test_report_warns_when_photos_show_another_crop():
+    stops = [_stops()[0].model_copy(update={"crop_seen": "corn"}),
+             _stops()[1].model_copy(update={"crop_seen": "unsure"})]
+    llm = FakeLlm([LlmTurn("r1", [], "Waterhemp was found. Read the label before use.")])
+    report = build_report("w1", "soybean", stops, BOOK, [RECORD], llm)
+    assert report.crop_mismatch == ("1 of 2 photos looks like corn, but this walk was scouted as soybean. "
+                                    "Thresholds and label options below are for soybean. Re-run with the right crop.")
+    assert report.decision == "treat"  # the farmer's pick still decides
+
+
+def test_no_crop_warning_when_the_crop_matches_or_is_unclear():
+    stops = [_stops()[0].model_copy(update={"crop_seen": "soybean"}), _stops()[1]]
+    llm = FakeLlm([LlmTurn("r1", [], "Waterhemp was found. Read the label before use.")])
+    assert build_report("w1", "soybean", stops, BOOK, [RECORD], llm).crop_mismatch is None
+
+
+def test_crop_warning_wording_for_several_photos_and_other_crops():
+    two = [StopResult(stop_index=i, image_hash=str(i), crop_seen="corn") for i in range(2)]
+    assert crop_mismatch("soybean", two).startswith("2 of 2 photos look like corn")
+    other = [StopResult(stop_index=0, image_hash="a", crop_seen="other")]
+    assert crop_mismatch("corn", other).startswith("1 of 1 photos doesn't look like corn. Thresholds")

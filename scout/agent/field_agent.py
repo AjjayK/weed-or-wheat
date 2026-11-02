@@ -35,6 +35,21 @@ def template_explanation(decision: str, treat_mode: str | None, rule_trace: list
     return " ".join([head, *[line + "." for line in rule_trace[:4]], "Read the label before use."])
 
 
+def crop_mismatch(crop: str, stops: list[StopResult]) -> str | None:
+    """A warning when photos show another crop than the walk was scouted as. The farmer's pick still decides."""
+    ok = [s for s in stops if s.status == "ok"]
+    seen = [s.crop_seen for s in ok if s.crop_seen not in (None, "unsure", crop)]
+    if not seen:
+        return None
+    other, n = Counter(seen).most_common(1)[0][0], len(seen)
+    if other == "other":
+        head = f"{n} of {len(ok)} photos {'does' if n == 1 else 'do'}n't look like {crop}"
+    else:
+        head = (f"{n} of {len(ok)} photos {'looks' if n == 1 else 'look'} like {other}, but this walk was scouted as "
+                f"{crop}")
+    return f"{head}. Thresholds and label options below are for {crop}. Re-run with the right crop."
+
+
 def build_report(walk_id: str, crop: str, stops: list[StopResult], weeds: WeedBook, records: list[UseRecord],
                  llm) -> FieldReport:
     d = decide(stops, weeds)
@@ -82,4 +97,5 @@ def build_report(walk_id: str, crop: str, stops: list[StopResult], weeds: WeedBo
         walk_id=walk_id, crop=crop, stops=stops, species_summary=d.summaries, decision=d.decision,
         treat_mode=d.treat_mode, urgency=urgency_text, rule_trace=d.rule_trace,
         explanation=explanation or template_explanation(d.decision, d.treat_mode, d.rule_trace), options=options,
+        crop_mismatch=crop_mismatch(crop, stops),
     )
