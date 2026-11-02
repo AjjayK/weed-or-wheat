@@ -171,7 +171,7 @@ class StopState:
             return None, "no green weed pixels in this area"
         self._next += 1
         inst = Instance(id=f"s{self.image.index}-i{self._next}", source="patch", prompt=label, box=box,
-                        area_px=int(mask.sum()), role="weed", plant_count=max(pieces, 1))
+                        area_px=int(mask.sum()), role="weed", plant_count=pieces)
         self.instances[inst.id], self.masks[inst.id], self.patch_boxes[inst.id] = inst, mask, box
         return inst, None
 
@@ -181,26 +181,35 @@ class StopState:
         for iid, box in self.patch_boxes.items():
             mask, pieces = patch_mask(self.green, box, crop)
             self.masks[iid] = mask
-            self.instances[iid].area_px, self.instances[iid].plant_count = int(mask.sum()), max(pieces, 1)
+            self.instances[iid].area_px, self.instances[iid].plant_count = int(mask.sum()), pieces
+
+    def _weed_areas(self) -> list[Instance]:
+        """Weed areas that still hold weed pixels. One that crop marked later covers completely stays registered (a
+        later change to the crop can refill it) but no longer counts."""
+        return [i for i in self.instances.values() if i.role == "weed" and i.source == "patch" and i.area_px > 0]
 
     def has_weed_area(self) -> bool:
-        return any(i.role == "weed" and i.source == "patch" for i in self.instances.values())
+        return bool(self._weed_areas())
 
     def weeds_marked(self) -> tuple[int, int]:
         """(weeds boxed one by one, weed areas)."""
-        weeds = [i for i in self.instances.values() if i.role == "weed"]
-        areas = sum(1 for i in weeds if i.source == "patch")
-        return len(weeds) - areas, areas
+        weeds = sum(1 for i in self.instances.values() if i.role == "weed" and i.source != "patch")
+        return weeds, len(self._weed_areas())
 
     def plants_marked(self) -> int:
+        """Every weed's plant count added up. An upper bound: it doesn't apply the measuring step's duplicate rules,
+        so boxes and weed areas that overlap are counted twice."""
         return sum(i.plant_count for i in self.instances.values() if i.role == "weed")
 
-    def maybe_unmarked(self) -> bool:
-        """The agent didn't confirm every weed is marked, or, without weed areas, marked well under its estimate."""
+    def maybe_unmarked(self, plants: int | None = None) -> bool:
+        """The agent didn't confirm every weed is marked, or, without weed areas, marked well under its estimate.
+
+        plants is the measured weed count when the caller has it; otherwise the raw sum from plants_marked."""
         if self.all_weeds_marked is not True:
             return True
         if self.weeds_estimate and not self.has_weed_area():
-            return self.plants_marked() < UNMARKED_SHARE * self.weeds_estimate
+            marked = plants if plants is not None else self.plants_marked()
+            return marked < UNMARKED_SHARE * self.weeds_estimate
         return False
 
     def count_approximate(self, view_type: str | None = None) -> bool:
@@ -241,5 +250,5 @@ class StopState:
         weed = self.union_of(lambda i: i.role == "weed")
         crop = self.union_of(lambda i: i.role == "crop") & ~weed  # weeds win: a weed in the row keeps its pixels
         flagged = [i.box for i in self.instances.values() if i.role == "weed" and i.check_this]
-        areas = [self.patch_boxes[i.id] for i in self.instances.values() if i.role == "weed" and i.id in self.patch_boxes]
+        areas = [self.patch_boxes[i.id] for i in self._weed_areas()]
         return render_overlay(self.image.work, crop, weed, self.row_band(), flagged, areas)

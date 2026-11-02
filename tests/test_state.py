@@ -185,3 +185,23 @@ def test_overlay_outlines_weed_areas_in_blue():
     state = StopState(field_photo(), "soybean")
     state.add_patch((50, 50, 90, 90), "horsetail")
     assert state.overlay().getpixel((50, 70)) == AREA_RGB
+
+
+def test_a_weed_area_the_crop_covers_completely_no_longer_counts():
+    state = StopState(field_photo(), "soybean")
+    inst, _ = state.add_patch((50, 50, 90, 90), "horsetail")
+    state.add_mask(rect(55, 55, 80, 85), "prompt", "soybean leaves", role="crop")
+    state.refresh_patches()
+    assert inst.area_px == 0 and inst.plant_count == 0 and inst.id in state.instances  # kept: the agent may refer to it
+    assert state.plants_marked() == 0 and state.weeds_marked() == (0, 0)
+    assert not state.has_weed_area() and not state.count_approximate("row")
+    state.all_weeds_marked, state.weeds_estimate = True, 20
+    assert state.maybe_unmarked()
+    assert state.overlay().getpixel((50, 70)) != AREA_RGB  # no blue box around nothing
+
+
+def test_maybe_unmarked_can_take_the_measured_plant_count():
+    state = StopState(field_photo(), "soybean")
+    state.all_weeds_marked, state.weeds_estimate = True, 10
+    state.add_mask(rect(60, 60, 65, 80), "prompt", "waterhemp", role="weed")
+    assert state.maybe_unmarked() and not state.maybe_unmarked(plants=9)
