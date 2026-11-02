@@ -357,3 +357,12 @@ def test_stop_level_flags_come_first_and_per_plant_checks_are_capped():
     assert result.flags == ["This photo looks like corn, not soybean",
                             *[f"Check s0-i{n}: low confidence" for n in range(2, 12)],
                             "…and 2 more plants to check"]
+
+
+def test_instructions_ask_for_every_weed_not_a_sample():
+    text = stop_instructions("corn", ["field_horsetail"], 30)
+    assert "survey" in text and 'kind "patch"' in text and "all_weeds_marked" in text
+    assert "not a sample" in text and "up to 6" in text and "30 tool calls" in text and "picture" in text
+    assert "at most 16" not in text and "6 turns" not in text and "largest first" not in text
+    assert "at most 2" not in text
+    assert "unsure" in text  # no crop in view (a close-up of a weed): don't call it another crop
