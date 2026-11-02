@@ -72,16 +72,22 @@ def compute_metrics(instances: list[Instance], masks: dict[str, np.ndarray], siz
             continue
         on_ground = np.asarray(masks[inst.id], dtype=bool) & ground
         own = on_ground & ~weed_mask
-        own_px = int(own.sum())
-        if own_px == 0 or own_px < MIN_OWN_FRAC * int(on_ground.sum()):
+        own_px, ground_px_of_it = int(own.sum()), int(on_ground.sum())
+        if own_px == 0:
+            continue
+        if inst.source == "patch":  # a weed area is many plants: count the share of its pieces no box counted yet
+            plants = max(1, round(inst.plant_count * own_px / ground_px_of_it))
+        elif own_px < MIN_OWN_FRAC * ground_px_of_it:
             continue  # a second box on a plant already counted
+        else:
+            plants = inst.plant_count
         key = species_key(inst)
         weed_mask |= own
         if key in species_masks:
             species_masks[key] |= own
         else:
             species_masks[key] = own
-        species_counts[key] = species_counts.get(key, 0) + inst.plant_count  # a weed area holds several plants
+        species_counts[key] = species_counts.get(key, 0) + plants  # a weed area holds several plants
         if inst.height_in is not None:
             heights.append(inst.height_in)
             species_heights[key] = max(species_heights.get(key, 0.0), inst.height_in)

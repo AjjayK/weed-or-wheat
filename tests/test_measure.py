@@ -136,3 +136,15 @@ def test_a_weed_area_counts_its_pieces_and_makes_the_count_approximate():
     m = compute_metrics(instances + [area], masks, SIZE, "close_up")
     assert m.weed_count == 9 and m.species["waterhemp"] == 8 and m.count_approximate is True
     assert m.weed_cover_pct == 3.0  # w1, w2 and the area: 100 px each
+
+
+def test_a_weed_area_counts_only_the_pieces_no_box_already_counted():
+    box = Instance(id="b", source="prompt", prompt="horsetail clump", box=(40, 40, 58, 70), area_px=540, role="weed",
+                   species_id="waterhemp")
+    area = Instance(id="p", source="patch", prompt="horsetail", box=(40, 40, 70, 70), area_px=900, role="weed",
+                    species_id="waterhemp", plant_count=10)
+    masks = {"b": _mask((40, 40, 58, 70)), "p": _mask((40, 40, 70, 70))}
+    m = compute_metrics([box, area], masks, SIZE, "close_up")
+    assert m.weed_count == 5 and m.weed_cover_pct == 9.0  # 1 boxed plant + 10 pieces x 360 of 900 px not yet counted
+    m = compute_metrics([area, box], masks, SIZE, "close_up")
+    assert m.weed_count == 10 and m.weed_cover_pct == 9.0  # the box lies wholly inside the area: nothing new
