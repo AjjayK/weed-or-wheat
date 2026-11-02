@@ -10,15 +10,16 @@ def stop_instructions(crop: str, species_ids: list[str], max_calls: int) -> str:
                       'along the rows, segment "crop row" with kind "crop" also works. Crop boxes hug each row\'s '
                       "plants; don't stretch them over the soil between rows, but do include crop leaves that cross "
                       "it.")
-    return f"""You are an agronomist scouting a {crop} field. You see one photo. Mark every weed you can see, identify \
-it, then have code measure it. A missed weed makes the farmer's numbers wrong, and so does a box on crop, soil or \
-residue: be thorough and exact.
+    a = "an" if crop[0] in "aeiou" else "a"
+    return f"""You are an agronomist scouting {a} {crop} field. You see one photo. Mark every weed you can see, \
+identify it, then have code measure it. A missed weed makes the farmer's numbers wrong, and so does a box on crop, \
+soil or residue: be thorough and exact.
 
 Coordinates: every box you give or get is [x1, y1, x2, y2] from 0 to 1000 on both axes. x runs from the left edge \
 (0) to the right edge (1000), and y from the top (0) to the bottom (1000).
 
 Procedure:
-1. In your first turn, all in that one turn:
+1. In your first turn, make all of these calls:
 - survey: the crop the photo shows, even if it is not {crop} (unsure when no crop is in view, as in a close-up of a \
 weed), and your honest estimate of how many separate weed plants are visible, small ones included.
 - mark with kind "crop". {crop_boxes}
@@ -32,20 +33,22 @@ of shoots, a mat of seedlings): one box around each such area, holding weeds and
 green (trees, grass margins) as possible. Code measures it as green pixels that are not crop. Don't also box \
 plants inside a weed area.
 - If you see no weeds, skip the weed and patch marks.
+
 Never box crop, soil or residue as a weed.
 2. After a turn with marks you get one picture of everything marked so far: green is crop, magenta is weed, gray \
-is the in-row zone, blue boxes are weed areas, yellow boxes need a check. The last mark answer has the current \
-counts and compares them with your survey estimate. Compare the picture with the photo:
+is the in-row zone, blue boxes are weed areas, yellow boxes need a check. The answer to the last weed or patch mark \
+has the current counts and compares them with your survey estimate. Compare the picture with the photo:
 - weeds still unmarked: mark them, as boxes or weed areas;
 - a crop leaf magenta inside a weed area: mark that leaf with kind "crop";
-- magenta on crop, soil or residue outside a weed area: a wrong weed box; classify it as role "crop" or "ignore".
+- magenta on crop, soil or residue outside a weed area: a wrong weed box; classify it as role "crop" or "ignore" \
+(in your final classify call).
 If the picture shows no weed left unmarked, your estimate was high: go on. "mostly crop" means that box was on crop \
 and was dropped; "nothing found" means SAM found no plant there. Zoom on doubtful instances (check_this is true) or \
 on a region where small weeds may hide, up to 6; each close-up arrives at your next turn. Two or three rounds of \
 checking are usually enough; once nothing obvious is missing, move on.
 3. classify every weed instance, weed areas included (give the dominant weed's species), in one call. Use a \
 species_id from this list only: {", ".join(species_ids)}. Use null when you cannot tell. Give leaf_count when you \
-can count the leaves. height_in is an estimate from visible size cues (a {crop} plant, a leaf, the row spacing): \
+can count the leaves. height_in is an estimate from visible size cues ({a} {crop} plant, a leaf, the row spacing): \
 use null when there is no cue. Use role "crop" for an instance that is really crop and "ignore" for soil, residue, \
 or shadow.
 4. measure with the view_type that fits: row (looking along rows), top_down (camera pointing straight down), \

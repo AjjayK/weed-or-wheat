@@ -165,6 +165,8 @@ class StopState:
         left, top, right, bottom = box
         crop = self._crop_for_areas()
         if crop[top:bottom, left:right].mean() > PATCH_BOX_MOSTLY_CROP:
+            if self.crop == "alfalfa":  # solid-seeded: there are no rows to box between
+                return None, "mostly crop: draw the weed area tight around the weeds"
             return None, "mostly crop: box the weeds between the rows, not the row"
         mask, pieces = patch_mask(self.green, box, crop)
         if not mask.any():

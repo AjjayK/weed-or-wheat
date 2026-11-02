@@ -375,3 +375,4 @@ def test_instructions_guard_against_over_marking_and_keep_calls_for_the_end():
     assert 'classify it as role "crop" or "ignore"' in corn and "Don't also box plants inside a weed area" in corn
     alfalfa = stop_instructions("alfalfa", ["dandelion"], 30)
     assert "mark the alfalfa around it as crop" in alfalfa and "hug each row's plants" not in alfalfa
+    assert "an alfalfa field" in alfalfa and "a alfalfa" not in alfalfa

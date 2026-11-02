@@ -166,6 +166,13 @@ def test_weed_area_on_the_row_or_on_bare_soil_is_refused():
     assert state.patch_boxes == {}
 
 
+def test_alfalfa_weed_area_on_crop_is_refused_without_row_wording():
+    state = StopState(field_photo(), "alfalfa")
+    state.add_mask(rect(10, 0, 30, 100), "prompt", "alfalfa", role="crop")
+    result = state.add_patch((5, 10, 35, 90), "alfalfa")
+    assert result == (None, "mostly crop: draw the weed area tight around the weeds")
+
+
 def test_unmarked_weeds_are_suspected_until_confirmed_and_the_estimate_is_met():
     state = StopState(field_photo(), "soybean")
     assert state.maybe_unmarked()  # finish never said every weed is marked
