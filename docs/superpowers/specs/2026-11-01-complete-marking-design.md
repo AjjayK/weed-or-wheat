@@ -135,8 +135,8 @@ overlay in the report both use it. The report legend adds "Blue box: weed area m
 - When `crop_seen` is `corn`, `soybean`, `alfalfa` or `other` and differs from the walk's crop, the stop gets the
   flag "This photo looks like corn, not soybean" (`other`: "This photo doesn't look like soybean"). `unsure` raises
   nothing. `StopResult` gains `crop_seen: str | None`.
-- `FieldReport` gains `crop_mismatch: str | None`, set by `build_report` when any ok stop mismatches: "1 of 1 photos
-  looks like corn, but this walk was scouted as soybean. Thresholds and label options below are for soybean. Re-run
+- `FieldReport` gains `crop_mismatch: str | None`, set by `build_report` when any stop that did not fail mismatches:
+  "1 of 1 photo looks like corn, but this walk was scouted as soybean. The label options below are for soybean. Re-run
   with the right crop." The report template shows it at the top, above the decision.
 - The decision is not changed: the farmer's pick stays authoritative.
 - The upload form's crop menu starts on a disabled "Choose the crop" option and is required.

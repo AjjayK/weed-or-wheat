@@ -37,18 +37,22 @@ def template_explanation(decision: str, treat_mode: str | None, rule_trace: list
 
 def crop_mismatch(crop: str, stops: list[StopResult]) -> str | None:
     """A warning when photos show another crop than the walk was scouted as. The farmer's pick still decides."""
-    ok = [s for s in stops if s.status == "ok"]
-    seen = [s.crop_seen for s in ok if s.crop_seen not in (None, "unsure", crop)]
+    shown = [s for s in stops if s.status != "failed"]  # a no_crop_found stop still saw a crop
+    seen = [s.crop_seen for s in shown if s.crop_seen not in (None, "unsure", crop)]
     if not seen:
         return None
-    other, n = Counter(seen).most_common(1)[0]
-    noun = "photo" if len(ok) == 1 else "photos"
-    if other == "other":
-        head = f"{n} of {len(ok)} {noun} {'does' if n == 1 else 'do'}n't look like {crop}"
+    total = len(shown)
+    noun = "photo" if total == 1 else "photos"
+    if len(set(seen)) > 1:  # several other crops: say so plainly and count every mismatch
+        head = f"{len(seen)} of {total} {noun} don't look like {crop}"
     else:
-        head = (f"{n} of {len(ok)} {noun} {'looks' if n == 1 else 'look'} like {other}, but this walk was scouted as "
-                f"{crop}")
-    return f"{head}. Thresholds and label options below are for {crop}. Re-run with the right crop."
+        other, n = seen[0], len(seen)
+        if other == "other":
+            head = f"{n} of {total} {noun} {'does' if n == 1 else 'do'}n't look like {crop}"
+        else:
+            head = (f"{n} of {total} {noun} {'looks' if n == 1 else 'look'} like {other}, but this walk was scouted "
+                    f"as {crop}")
+    return f"{head}. The label options below are for {crop}. Re-run with the right crop."
 
 
 def build_report(walk_id: str, crop: str, stops: list[StopResult], weeds: WeedBook, records: list[UseRecord],

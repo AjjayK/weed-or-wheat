@@ -103,3 +103,7 @@ def test_crop_mismatch_banner_comes_before_the_decision():
 
 def test_legend_explains_blue_weed_areas():
     assert "Blue box: weed area measured by green pixels" in _html(_report())
+
+
+def test_warning_keeps_its_fill_when_printed():
+    assert re.search(r"@media print \{.*\.warning \{[^}]*print-color-adjust: exact", _html(_report()))

@@ -73,7 +73,7 @@ def test_report_warns_when_photos_show_another_crop():
     llm = FakeLlm([LlmTurn("r1", [], "Waterhemp was found. Read the label before use.")])
     report = build_report("w1", "soybean", stops, BOOK, [RECORD], llm)
     assert report.crop_mismatch == ("1 of 2 photos looks like corn, but this walk was scouted as soybean. "
-                                    "Thresholds and label options below are for soybean. Re-run with the right crop.")
+                                    "The label options below are for soybean. Re-run with the right crop.")
     assert report.decision == "treat"  # the farmer's pick still decides
 
 
@@ -87,10 +87,22 @@ def test_crop_warning_wording_for_several_photos_and_other_crops():
     two = [StopResult(stop_index=i, image_hash=str(i), crop_seen="corn") for i in range(2)]
     assert crop_mismatch("soybean", two).startswith("2 of 2 photos look like corn")
     other = [StopResult(stop_index=0, image_hash="a", crop_seen="other")]
-    assert crop_mismatch("corn", other).startswith("1 of 1 photo doesn't look like corn. Thresholds")
+    assert crop_mismatch("corn", other).startswith("1 of 1 photo doesn't look like corn. The label options below are for corn.")
 
 
-def test_crop_warning_counts_only_the_named_other_crop():
+def test_crop_warning_says_plainly_when_photos_show_different_crops():
     mixed = [StopResult(stop_index=0, image_hash="a", crop_seen="corn"),
              StopResult(stop_index=1, image_hash="b", crop_seen="alfalfa")]
-    assert crop_mismatch("soybean", mixed).startswith("1 of 2 photos looks like corn")
+    assert crop_mismatch("soybean", mixed).startswith("2 of 2 photos don't look like soybean")
+
+
+def test_crop_warning_counts_stops_that_found_no_crop_but_not_failed_ones():
+    stops = [StopResult(stop_index=0, image_hash="a", crop_seen="corn", status="no_crop_found"),
+             StopResult(stop_index=1, image_hash="b", crop_seen="corn", status="no_crop_found"),
+             StopResult(stop_index=2, image_hash="c", crop_seen="corn", status="failed")]
+    assert crop_mismatch("soybean", stops).startswith("2 of 2 photos look like corn")
+
+
+def test_crop_warning_plural_other_form():
+    others = [StopResult(stop_index=i, image_hash=str(i), crop_seen="other") for i in range(2)]
+    assert crop_mismatch("corn", others).startswith("2 of 2 photos don't look like corn")
