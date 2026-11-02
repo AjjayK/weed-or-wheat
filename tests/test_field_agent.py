@@ -87,4 +87,10 @@ def test_crop_warning_wording_for_several_photos_and_other_crops():
     two = [StopResult(stop_index=i, image_hash=str(i), crop_seen="corn") for i in range(2)]
     assert crop_mismatch("soybean", two).startswith("2 of 2 photos look like corn")
     other = [StopResult(stop_index=0, image_hash="a", crop_seen="other")]
-    assert crop_mismatch("corn", other).startswith("1 of 1 photos doesn't look like corn. Thresholds")
+    assert crop_mismatch("corn", other).startswith("1 of 1 photo doesn't look like corn. Thresholds")
+
+
+def test_crop_warning_counts_only_the_named_other_crop():
+    mixed = [StopResult(stop_index=0, image_hash="a", crop_seen="corn"),
+             StopResult(stop_index=1, image_hash="b", crop_seen="alfalfa")]
+    assert crop_mismatch("soybean", mixed).startswith("1 of 2 photos looks like corn")

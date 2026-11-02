@@ -41,11 +41,12 @@ def crop_mismatch(crop: str, stops: list[StopResult]) -> str | None:
     seen = [s.crop_seen for s in ok if s.crop_seen not in (None, "unsure", crop)]
     if not seen:
         return None
-    other, n = Counter(seen).most_common(1)[0][0], len(seen)
+    other, n = Counter(seen).most_common(1)[0]
+    noun = "photo" if len(ok) == 1 else "photos"
     if other == "other":
-        head = f"{n} of {len(ok)} photos {'does' if n == 1 else 'do'}n't look like {crop}"
+        head = f"{n} of {len(ok)} {noun} {'does' if n == 1 else 'do'}n't look like {crop}"
     else:
-        head = (f"{n} of {len(ok)} photos {'looks' if n == 1 else 'look'} like {other}, but this walk was scouted as "
+        head = (f"{n} of {len(ok)} {noun} {'looks' if n == 1 else 'look'} like {other}, but this walk was scouted as "
                 f"{crop}")
     return f"{head}. Thresholds and label options below are for {crop}. Re-run with the right crop."
 
