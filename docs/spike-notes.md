@@ -192,4 +192,4 @@ Muse Spark gave a tight box per weed in 0–1000 coordinates, and all of a photo
   - The weed-free photo 3AEE1239 still took 291 s and 14 calls.
   - So a 10-photo walk takes about 5 to 6.5 minutes. That is at the top of the 3-6 minute target.
 - **SAM:** no busy errors, timeouts or retries with 10 stops in parallel.
-- **HEIC:** IMG_6564 and IMG_6942 are `.HEIC` files and both opened fine. These are the first real HEIC files tested; the earlier ".HEIC" files were JPEGs inside.
+- **HEIC:** IMG_6564 and IMG_6942 are named `.HEIC` but are JPEGs inside (their first bytes are a JFIF header), so a real iPhone HEIC is still untested. The earlier run's script was called with `.JPG` names for them, so they were rerun on their own; they don't count toward the parallel timing above.
