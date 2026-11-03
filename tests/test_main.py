@@ -255,3 +255,16 @@ def test_replay_waits_the_gap_over_the_speed_capped_and_never_negative(tmp_path,
     replayed = _event_data(_client(tmp_path).get("/walks/0123456789abcdef/events").text)
     assert len(replayed) == 4
     assert waits == [2.0, 0, 3.0]
+
+
+def test_uploading_a_saved_walk_again_keeps_its_replay(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "REPLAY_SPEED", 1e9)
+    client = _client(tmp_path)
+    walk_id = _upload(client).json()["walk_id"]
+    client.get(f"/walks/{walk_id}/events")  # waits for the first run, which saves the report
+    events = [{"type": "walk_start", "crop": "soybean", "stops": [], "t": 0.0}, {"type": "report_ready", "t": 9.0}]
+    (tmp_path / walk_id / "events.json").write_text(json.dumps(events))
+    later = _client(tmp_path)  # a later server: the walk is saved, not in memory
+    assert _upload(later).json()["walk_id"] == walk_id
+    replayed = _event_data(later.get(f"/walks/{walk_id}/events").text)
+    assert [e["type"] for e in replayed] == ["walk_start", "report_ready"] and all(e["replay"] for e in replayed)

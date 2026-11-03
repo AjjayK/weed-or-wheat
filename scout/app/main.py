@@ -87,18 +87,19 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
         walk_id = walk_id_for(crop, images)
         if walk_id in walks and walks[walk_id].status != "failed":
             return {"walk_id": walk_id}
-        if pipeline.cached(walk_id) is None:
-            ip = client_ip(request)
-            now = time.time()
-            for key in list(recent):  # forget visitors whose last walk is over an hour old
-                recent[key] = [t for t in recent[key] if now - t < 3600]
-                if not recent[key]:
-                    del recent[key]
-            recent_all[:] = [t for t in recent_all if now - t < 3600]
-            if len(recent.get(ip, ())) >= settings.walks_per_ip_per_hour or len(recent_all) >= settings.walks_per_hour:
-                raise HTTPException(429, "You've reached the hourly limit. Open a sample walk instead.")
-            recent[ip].append(now)
-            recent_all.append(now)
+        if pipeline.cached(walk_id) is not None:  # no Walk: an in-memory one would hide the saved replay for good
+            return {"walk_id": walk_id}
+        ip = client_ip(request)
+        now = time.time()
+        for key in list(recent):  # forget visitors whose last walk is over an hour old
+            recent[key] = [t for t in recent[key] if now - t < 3600]
+            if not recent[key]:
+                del recent[key]
+        recent_all[:] = [t for t in recent_all if now - t < 3600]
+        if len(recent.get(ip, ())) >= settings.walks_per_ip_per_hour or len(recent_all) >= settings.walks_per_hour:
+            raise HTTPException(429, "You've reached the hourly limit. Open a sample walk instead.")
+        recent[ip].append(now)
+        recent_all.append(now)
         walk = Walk(id=walk_id, crop=crop)
         walks[walk_id] = walk
         names = [upload.filename or f"Photo {index + 1}" for index, upload in enumerate(files)]
