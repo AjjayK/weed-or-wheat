@@ -1,0 +1,13 @@
+.venv
+.git
+.env
+field-images
+store
+spike_out
+run_out*
+scout/labels/pdfs
+**/__pycache__
+tests
+evaluation
+docs
+scripts
