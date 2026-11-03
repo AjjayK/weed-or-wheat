@@ -147,3 +147,49 @@ Muse Spark gave a tight box per weed in 0–1000 coordinates, and all of a photo
   - field horsetail in corn: 0
 
 **Hand check (Step 5):** pending, done by the user.
+
+## Complete marking (2026-11-02, `scripts/run_stop.py`, spec `2026-11-01-complete-marking-design.md`)
+
+**What changed:**
+- **Survey:** the agent first reports the crop it sees and its estimate of weeds visible.
+- **Marking:** `mark` takes up to 120 boxes, sent to SAM in parallel 16-box chunks. The new `patch` kind (a weed area) is measured as green non-crop pixels.
+- **Feedback:** every mark answers with counts against the estimate, the calls and seconds left, and a picture of the marking.
+- **Flags:** "Some weeds may be unmarked" and a crop-mismatch flag, plus a banner on the report.
+- **Budget:** 30 calls, 360 s per stop, all photos at once.
+
+**Live run:** the 10 test photos, run as three parallel batches (corn, soybean, alfalfa) at the same time. The before column is the Task 18 run.
+
+| Photo | Before cover / count | After cover / count | Seconds | Crop seen | Survey (estimates) | Marks | All marked | Flags (first two) |
+|---|---|---|---|---|---|---|---|---|
+| 3AEE1239 (soybean) | 0.0% / 0 | 0.0% / 0 | 291 | soybean | 0 | 2 | true | none |
+| IMG_3922 (alfalfa) | 1.4% / 45 | 3.71% / 109 | 380 | alfalfa | 150 | 4 | never finished | unmarked |
+| IMG_3926 (alfalfa) | 2.38% / 23 | 2.45% / 26 | 206 | alfalfa | 14 | 1 | true | low confidence |
+| IMG_4214 (corn) | 11.84% / 12 | 22.76% / 40 | 51 | corn | 100 | 3 | true | approximate; low confidence |
+| IMG_4215 (corn) | 5.87% / 12 | 16.41% / 58 | 114 | corn | 70, then 58 | 2 | true | approximate |
+| IMG_4219 (soybean) | 9.61% / 6 | 5.97% / 9 | 211 | soybean | 18, then 14 | 4 | true | unmarked; low confidence |
+| IMG_4220 (soybean) | 10.2% / 8 | 12.39% / 22 | 225 | soybean | 30, then 22 | 3 | true | approximate |
+| IMG_4547 (corn) | 11.18% / 5 | 4.39% / 22 | 290 | corn | 120, then 35 | 7 | false | unmarked; approximate |
+| IMG_6564 (corn) | 6.75% / 14 | 10.89% / 60 | 237 | corn | 60 | 4 | true | 57 low confidence (capped at 10 lines) |
+| IMG_6942 (alfalfa) | 0.0% / 0 | 0.0% / 0 | 17 | alfalfa | 0 | 0 | true | none |
+
+**Findings:**
+- **The horsetail photo (IMG_4215) is fixed.** The agent drew one weed area over the near inter-row. The shoots are magenta and the soil isn't. Cover went from 5.87% to 16.41%, with 58 pieces instead of 12 clumps.
+- **Crop mismatch works.** IMG_4215 scouted as soybean took 101 s and gave the flag "This photo looks like corn, not soybean". The report banner reads "1 of 1 photo looks like corn, but this walk was scouted as soybean. The label options below are for soybean. Re-run with the right crop."
+- **Other photos marked more:**
+  - IMG_4214: grass carpet as 3 weed areas, 22.76%.
+  - IMG_6564: 60 small broadleaf seedlings boxed one by one, all low confidence.
+  - IMG_3922: 109 dandelions.
+  - IMG_4220: 22 waterhemp.
+- **Two covers went down.**
+  - IMG_4219: the old run's big patch at the bottom is gone, and the boxes are tighter.
+  - IMG_4547: the four large blobs from the old run, which were probably corn plants, became 22 small marks along the rows. Their regular spacing along the rows still looks like crop, so this photo stays an open question.
+- **Remaining errors:**
+  - On IMG_4215, a corn leaf crossing the weed area is still magenta. The agent didn't box it as crop, even though the prompt asks it to.
+  - Distant shoots outside the drawn area aren't counted.
+- **Re-surveys:** the agent re-surveyed on 4 of 10 photos, always lowering its estimate (120 to 35, 30 to 22, 18 to 14, 70 to 58). This is how the prompt now asks it to correct a high estimate. It also means the unmarked flag rests more on the agent's own word.
+- **Timing:**
+  - All stops finished within 6.3 minutes. The slowest was IMG_3922, which hit the time limit at 380 s: the limit is checked between turns, so a turn can overrun it. That stop never finished, so it got the unmarked flag.
+  - The weed-free photo 3AEE1239 still took 291 s and 14 calls.
+  - So a 10-photo walk takes about 5 to 6.5 minutes. That is at the top of the 3-6 minute target.
+- **SAM:** no busy errors, timeouts or retries with 10 stops in parallel.
+- **HEIC:** IMG_6564 and IMG_6942 are `.HEIC` files and both opened fine. These are the first real HEIC files tested; the earlier ".HEIC" files were JPEGs inside.
