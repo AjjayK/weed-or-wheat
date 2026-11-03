@@ -133,3 +133,10 @@ def test_reports_without_step_pictures_still_render():
     report.stops[0].steps = [AgentStep(t_ms=1, tool="mark", summary="Mark weed: 1 of 1 boxes kept")]
     html = _html(report)
     assert "Mark weed: 1 of 1 boxes kept" in html and "/steps/" not in html
+
+
+def test_a_thought_without_narration_does_not_repeat_its_first_line():
+    report = _report()
+    report.stops[0].steps = [AgentStep(t_ms=1, tool="think", summary="Counting weeds", detail=["Counting weeds", "Boxing rows"])]
+    html = _html(report)
+    assert html.count("Counting weeds") == 1 and "Boxing rows" in html

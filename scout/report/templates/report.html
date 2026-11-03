@@ -138,7 +138,7 @@
       <ol class="timeline">
       {% for step in s.steps %}
         {% if step.tool == "think" %}
-        <li class="think">“{{ step.summary }}”{% for line in step.detail %}<div class="detail">{{ line }}</div>{% endfor %}</li>
+        <li class="think">“{{ step.summary }}”{% for line in step.detail if line != step.summary %}<div class="detail">{{ line }}</div>{% endfor %}</li>
         {% else %}
         <li{% if not step.ok %} class="failed"{% endif %}><span class="tool">{{ step.tool }}</span> {{ step.summary }}{% if step.picture and step_url(step.picture) %}<img src="{{ step_url(step.picture) }}" alt="" loading="lazy">{% endif %}</li>
         {% endif %}

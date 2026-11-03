@@ -348,7 +348,7 @@ function handle(event) {
     case "thought": {
       const stop = stopFor(event.stop);
       stop.thought = event.text;
-      stop.detail = event.detail || [];
+      stop.detail = (event.detail || []).filter((line) => line !== event.text);  // no narration: line 1 is the thought
       touch(stop);
       break;
     }
