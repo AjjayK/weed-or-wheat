@@ -89,8 +89,9 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
             history += turn.output_items
             thought = (turn.text or "").strip()
             if thought or turn.reasoning:  # what the agent is thinking, for people watching; before the turn's tools
+                lines = turn.reasoning if thought else turn.reasoning[1:]  # no narration: line 1 is the thought
                 state.log("think", (thought or turn.reasoning[0])[:THOUGHT_SUMMARY_MAX_CHARS],
-                          detail=[line[:THOUGHT_MAX_CHARS] for line in turn.reasoning[:THOUGHT_LINES]])
+                          detail=[line[:THOUGHT_MAX_CHARS] for line in lines[:THOUGHT_LINES]])
             if not turn.calls:
                 if nudged:
                     break

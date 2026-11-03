@@ -456,4 +456,4 @@ def test_a_long_narration_is_capped_in_the_think_summary():
     assert result.steps[0].tool == "think" and result.steps[0].summary == "x" * 300
     reasoning_only = FakeLlm([LlmTurn("r1", [MARK_CROP], "", [], ["y" * 500]), LlmTurn("r2", _close("top_down"), "")])
     result, _ = _run(reasoning_only)
-    assert result.steps[0].summary == "y" * 300
+    assert result.steps[0].summary == "y" * 300 and result.steps[0].detail == []  # line 1 is the thought, not repeated
