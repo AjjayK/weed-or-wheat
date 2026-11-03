@@ -47,7 +47,7 @@
   .timeline .detail { color: var(--muted); }
   .timeline img { width: 64px; height: 48px; object-fit: cover; border-radius: 6px; vertical-align: middle; margin-left: 6px; }
   .timeline .failed { color: #A32D2D; }
-  @media print { .noprint, .timeline img { display: none; } details > * { display: block; } .warning { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .decision, .flag { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+  @media print { .noprint, .timeline img { display: none; } details::details-content { content-visibility: visible; display: contents; } .warning { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .decision, .flag { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
 </style>
 </head>
 <body>
@@ -150,5 +150,14 @@
 {% endfor %}
 </div>
 </main>
+<script>
+  // Print every <details> open (for browsers without ::details-content), then close them again.
+  let closedForPrint = [];
+  addEventListener("beforeprint", () => {
+    closedForPrint = [...document.querySelectorAll("details:not([open])")];
+    closedForPrint.forEach((d) => { d.open = true; });
+  });
+  addEventListener("afterprint", () => closedForPrint.forEach((d) => { d.open = false; }));
+</script>
 </body>
 </html>

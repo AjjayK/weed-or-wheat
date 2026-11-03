@@ -113,6 +113,12 @@ def test_legend_explains_blue_weed_areas():
     assert "Blue box: weed area measured by green pixels" in _html(_report())
 
 
+def test_closed_details_print_open():
+    html = _html(_report())
+    assert re.search(r"@media print \{.*details::details-content \{[^}]*content-visibility: visible", html)
+    assert "beforeprint" in html and "afterprint" in html  # browsers without ::details-content
+
+
 def test_warning_keeps_its_fill_when_printed():
     assert re.search(r"@media print \{.*\.warning \{[^}]*print-color-adjust: exact", _html(_report()))
 
