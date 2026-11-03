@@ -6,7 +6,7 @@ import logging
 import pytest
 from PIL import Image
 
-from scout.agent.state import StopFailed, StopState
+from scout.agent.state import MAX_BOXES, MAX_MARK_BOXES, StopFailed, StopState
 from scout.agent.tools import OVERLAY_CAPTION, TOOL_SCHEMAS, ToolRunner
 from scout.retry import BadRequest
 from scout.vision.sam_parse import SamRecord
@@ -33,6 +33,8 @@ def test_schemas_name_seven_tools():
     assert [t["name"] for t in TOOL_SCHEMAS] == ["survey", "segment", "mark", "zoom", "classify", "measure", "finish"]
     schemas = {t["name"]: t["parameters"] for t in TOOL_SCHEMAS}
     assert schemas["mark"]["properties"]["boxes"]["maxItems"] == 120
+    mark = next(t["description"] for t in TOOL_SCHEMAS if t["name"] == "mark")
+    assert f"up to {MAX_MARK_BOXES} per call" in mark and f"requests of {MAX_BOXES}" in mark
     assert schemas["mark"]["properties"]["kind"]["enum"] == ["crop", "weed", "patch"]
     assert "all_weeds_marked" in schemas["finish"]["required"]
     assert schemas["survey"]["required"] == ["crop_seen", "weeds_visible"]

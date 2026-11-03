@@ -140,7 +140,7 @@ def finalize(state: StopState, sam) -> StopResult:
     checks = [_flag(i) for i in instances if i.role == "weed" and i.check_this]
     flags += checks[:MAX_CHECK_FLAGS]
     if len(checks) > MAX_CHECK_FLAGS:
-        flags.append(f"…and {len(checks) - MAX_CHECK_FLAGS} more plants to check")
+        flags.append(f"...and {len(checks) - MAX_CHECK_FLAGS} more plants to check")
     has_crop = any(i.role == "crop" for i in instances)
     # Alfalfa is solid-seeded and its crop boxes are optional, so a worked alfalfa stop counts without them.
     worked = state.view_type is not None or any(i.role == "weed" for i in instances)

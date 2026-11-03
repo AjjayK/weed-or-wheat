@@ -392,7 +392,8 @@ def test_stop_level_flags_come_first_and_per_plant_checks_are_capped():
     assert result.weed_count == 12 and MAX_CHECK_FLAGS == 10
     assert result.flags == ["This photo looks like corn, not soybean",
                             *[f"Check s0-i{n}: low confidence" for n in range(2, 12)],
-                            "…and 2 more plants to check"]
+                            "...and 2 more plants to check"]  # plain dots: a unicode ellipsis garbles in Excel CSV
+    assert all(flag.isascii() for flag in result.flags)
 
 
 def test_instructions_ask_for_every_weed_not_a_sample():
@@ -408,6 +409,7 @@ def test_instructions_guard_against_over_marking_and_keep_calls_for_the_end():
     corn = stop_instructions("corn", ["field_horsetail"], 30)
     assert corn.count("Never box crop, soil or residue") >= 2 and "your estimate was high" in corn
     assert "call survey again" in corn  # the stored estimate is what marks are checked against
+    assert f"up to {MAX_MARK_BOXES} per mark call" in corn
     assert "seconds you have left" in corn and "tool calls and seconds" in corn
     assert "keep your last 4" in corn and "together in one turn" in corn and "even if it is not corn" in corn
     assert 'classify it as role "crop" or "ignore"' in corn and "Don't also box plants inside a weed area" in corn

@@ -87,10 +87,10 @@ TOOL_SCHEMAS = [
         "plants, leaves, or weeds in general: use mark for those.",
         {"phrase": {"type": "string"}, "kind": {"type": "string", "enum": list(KINDS)}},
         ["phrase", "kind"]),
-    _fn("mark", "Mark what you see with boxes. crop and weed boxes go to SAM 3.1, up to 120 per call; call again for "
-        "more (code splits them into requests of 16). patch boxes are areas of weeds too dense or small to box one by "
-        "one; code measures them as green pixels that are not crop. The answer comes with a picture of everything "
-        "marked so far.",
+    _fn("mark", f"Mark what you see with boxes. crop and weed boxes go to SAM 3.1, up to {MAX_MARK_BOXES} per call; "
+        f"call again for more (code splits them into requests of {MAX_BOXES}). patch boxes are areas of weeds too "
+        "dense or small to box one by one; code measures them as green pixels that are not crop. The answer comes "
+        "with a picture of everything marked so far.",
         {"kind": {"type": "string", "enum": list(MARK_KINDS),
                   "description": "crop: boxes around crop rows or crop plants (one tall box per visible row is "
                                  "fine). weed: a tight box around each weed, one per plant. patch: a box around an "

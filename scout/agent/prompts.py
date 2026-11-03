@@ -1,5 +1,7 @@
 """Instructions for the stop agent and the field explanation."""
 
+from scout.agent.state import MAX_MARK_BOXES
+
 
 def stop_instructions(crop: str, species_ids: list[str], max_calls: int) -> str:
     if crop == "alfalfa":
@@ -24,10 +26,10 @@ Procedure:
 weed), and your honest estimate of how many separate weed plants are visible, small ones included.
 - mark with kind "crop". {crop_boxes}
 - mark with kind "weed": a tight box around every weed plant you can tell apart: any number of boxes, all of them, \
-not a sample (up to 120 per mark call; call mark again for more). Large leaves close to the camera (the bottom of \
-a row photo) are usually crop; a weed there still gets a box if you can see its own stem and leaves apart from the \
-crop. A distinctive flowering weed can also be found by phrase: segment "dandelion" or "yellow flower" with kind \
-"weed".
+not a sample (up to {MAX_MARK_BOXES} per mark call; call mark again for more). Large leaves close to the camera \
+(the bottom of a row photo) are usually crop; a weed there still gets a box if you can see its own stem and \
+leaves apart from the crop. A distinctive flowering weed can also be found by phrase: segment "dandelion" or \
+"yellow flower" with kind "weed".
 - mark with kind "patch" (a weed area) where weeds grow too densely or are too small to box one by one (a carpet \
 of shoots, a mat of seedlings): one box around each such area, holding weeds and soil and as little crop or other \
 green (trees, grass margins) as possible. Code measures it as green pixels that are not crop. Don't also box \

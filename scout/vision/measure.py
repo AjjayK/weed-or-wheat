@@ -49,8 +49,9 @@ def species_key(instance: Instance) -> str:
 def compute_metrics(instances: list[Instance], masks: dict[str, np.ndarray], size: tuple[int, int],
                     view_type: str, sky: np.ndarray | None = None, band: np.ndarray | None = None,
                     capture_height_m: float = CAPTURE_HEIGHT_M) -> Metrics:
-    """Each pixel counts once. Weeds win over crop (the tools already dropped weed masks that were mostly crop),
-    and where weeds overlap, the one registered first owns the pixels."""
+    """Each pixel counts once. Weeds win over crop (the tools already dropped weed masks that were mostly crop).
+    Plain weeds are measured before weed areas, and within each group the weed registered first owns overlapping
+    pixels."""
     width, height = size
     ground = np.ones((height, width), dtype=bool)
     if sky is not None and view_type in ("row", "wide") and (~sky).mean() >= MIN_GROUND_FRAC:
