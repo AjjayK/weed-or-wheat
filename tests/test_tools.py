@@ -361,6 +361,66 @@ def test_a_rejected_chunk_names_its_boxes_and_registers_nothing():
     assert result.images == []
 
 
+class _Unavailable(FakeSam):
+    """A SAM that is busy or slow: its box requests raise a timeout, its concept requests a dropped connection."""
+
+    def __init__(self, only_size=None, **kwargs):
+        super().__init__(**kwargs)
+        self.only_size = only_size  # time out only requests of this many boxes; the rest answer
+
+    def segment_boxes(self, image, boxes):
+        if self.only_size in (None, len(boxes)):
+            self.calls.append(("boxes", tuple(boxes)))
+            raise TimeoutError("timed out")
+        return super().segment_boxes(image, boxes)
+
+    def segment_concept(self, image, phrase):
+        raise ConnectionError("connection dropped")
+
+
+def test_a_sam_timeout_is_an_error_the_agent_can_retry_and_the_third_ends_the_stop(caplog):
+    runner, state = _runner(_Unavailable())
+    args = {"kind": "weed", "boxes": [{"box": WEED_A, "label": "w"}]}
+    with caplog.at_level(logging.WARNING, logger="scout.agent.tools"):
+        result = runner.run("mark", args)
+    assert result.output == ("error: SAM is busy or timed out (boxes 1-1: TimeoutError). Nothing from this call was "
+                             "marked: send it again.")
+    assert state.instances == {} and result.images == [] and state.sam_unavailable == 1 and state.bad_requests == {}
+    assert state.steps[-1].tool == "mark" and state.steps[-1].ok is False
+    assert caplog.records[0].exc_info is not None  # the real error is logged, the agent only sees its type
+    assert runner.run("mark", args).output.startswith("error: SAM is busy")
+    assert state.sam_unavailable == 2
+    with pytest.raises(StopFailed):
+        runner.run("mark", args)
+    assert state.sam_unavailable == 3
+
+
+def test_a_timed_out_chunk_names_its_boxes_and_registers_nothing_from_the_chunks_that_answered():
+    runner, state = _runner(_Unavailable(only_size=4))  # the 16-box request answers, the 4-box one times out
+    items = [{"box": box, "label": "w"} for box in [WEED_A, WEED_B, *[BARE] * 18]]
+    out = runner.run("mark", {"kind": "weed", "boxes": items}).output
+    assert out == ("error: SAM is busy or timed out (boxes 17-20: TimeoutError). Nothing from this call was marked: "
+                   "send it again.")
+    assert state.instances == {} and state.sam_unavailable == 1
+
+
+def test_a_segment_that_cannot_reach_sam_is_the_same_kind_of_error():
+    runner, state = _runner(_Unavailable())
+    out = runner.run("segment", {"phrase": "dandelion", "kind": "weed"}).output
+    assert out == ("error: SAM is busy or timed out (ConnectionError). Nothing from this call was marked: send it "
+                   "again.")
+    assert state.sam_unavailable == 1 and state.bad_requests == {} and state.instances == {}
+
+
+def test_a_rejected_segment_is_still_a_bad_request():
+    runner, state = _runner(FakeSam(fail={"dandelion"}))
+    args = {"phrase": "dandelion", "kind": "weed"}
+    assert runner.run("segment", args).output == "error: SAM rejected the request: rejected dandelion"
+    assert state.bad_requests == {"segment": 1} and state.sam_unavailable == 0
+    with pytest.raises(StopFailed):
+        runner.run("segment", args)
+
+
 def test_mark_names_the_box_that_is_malformed():
     sam = FakeSam()
     runner, _ = _runner(sam)

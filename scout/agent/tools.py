@@ -27,11 +27,16 @@ MAX_LISTED = 100
 SAM_WORKERS = 4  # SAM requests in flight per mark call
 MAX_ESTIMATE = 1000  # the survey's weed estimate is capped here
 OVERLAY_QUALITY = 80  # JPEG quality of the picture sent back after a mark
+SAM_UNAVAILABLE_LIMIT = 3  # SAM busy or timing out this many times in one stop ends the stop
 NOTHING = "nothing found"
 MOSTLY_CROP_NOTE = "mostly crop"
 PATCH_NOTE = "large patch; counted as one, approximate"
 OVERLAY_CAPTION = ("What is marked now: green is crop, magenta is weed, gray is the in-row zone, "
                    "blue boxes are weed areas, yellow boxes need a check")
+
+
+class SamUnavailable(Exception):
+    """SAM did not answer (a rate limit that outlasted the retries, a server error, a timeout, a dropped connection)."""
 
 
 def _number(value, name: str) -> float | None:
@@ -148,6 +153,13 @@ class ToolRunner:
             if count >= 2:
                 raise StopFailed(f"SAM rejected {name} twice") from error
             return ToolResult(f"error: SAM rejected the request: {error}")
+        except SamUnavailable as error:  # a busy SAM is no reason to lose the marks made so far: say so, try again
+            self.state.sam_unavailable += 1
+            self.state.log(name, f"SAM unavailable: {error}", ok=False)
+            if self.state.sam_unavailable >= SAM_UNAVAILABLE_LIMIT:
+                raise StopFailed(f"SAM was unavailable {SAM_UNAVAILABLE_LIMIT} times") from error
+            return ToolResult(f"error: SAM is busy or timed out ({error}). Nothing from this call was marked: "
+                              "send it again.")
 
     def _brief(self, inst: Instance) -> dict:
         width, height = self.state.size
@@ -182,6 +194,9 @@ class ToolRunner:
             except BadRequest as error:  # name the boxes at fault; the whole call fails, so all boxes must be resent
                 raise BadRequest(f"boxes {start + 1}-{start + len(chunk)}: {error}. Nothing from this call was "
                                  "marked: send all the boxes again, changing those.") from error
+            except Exception as error:  # a 429 that outlasted the retries, a 5xx, a timeout, a dropped connection
+                log.warning("SAM did not answer boxes %d-%d", start + 1, start + len(chunk), exc_info=True)
+                raise SamUnavailable(f"boxes {start + 1}-{start + len(chunk)}: {type(error).__name__}") from error
 
         with ThreadPoolExecutor(max_workers=min(SAM_WORKERS, len(chunks))) as pool:
             answers = list(pool.map(ask, starts, chunks))
@@ -249,7 +264,14 @@ class ToolRunner:
         if not phrase:
             raise ValueError("phrase is empty")
         found, notes = [], []
-        for n, record in enumerate(self.sam.segment_concept(self.state.image, phrase), start=1):
+        try:
+            records = self.sam.segment_concept(self.state.image, phrase)
+        except BadRequest:
+            raise  # run() handles a rejected request
+        except Exception as error:
+            log.warning("SAM did not answer segment %r", phrase, exc_info=True)
+            raise SamUnavailable(type(error).__name__) from error
+        for n, record in enumerate(records, start=1):
             inst, note = self._add(record, kind, "concept", phrase)
             if inst is not None:
                 found.append(inst)

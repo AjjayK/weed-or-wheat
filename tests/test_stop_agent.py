@@ -219,11 +219,29 @@ def test_sky_timeout_does_not_fail_the_stop():
     assert sam.calls.count(("concept", "sky")) == 1  # asked once, by measure; finalize does not ask again
 
 
-def test_a_sam_timeout_fails_only_this_stop_and_keeps_steps():
-    llm = FakeLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", [MARK_WEEDS], "")])
+def test_three_sam_timeouts_fail_only_this_stop_and_keep_steps():
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", [MARK_WEEDS], ""), LlmTurn("r3", [MARK_WEEDS], ""),
+                   LlmTurn("r4", [MARK_WEEDS], "")])
     result, _ = _run(llm, sam=TimeoutSam(later_boxes=True))
-    assert result.status == "failed" and [s.tool for s in result.steps] == ["mark", "error"]
-    assert result.steps[-1].summary.startswith("TimeoutError")
+    assert result.status == "failed" and [s.tool for s in result.steps] == ["mark", "mark", "mark", "mark", "error"]
+    assert [s.ok for s in result.steps] == [True, False, False, False, False]
+    assert result.steps[-1].summary.startswith("StopFailed")
+
+
+def test_a_sam_timeout_is_told_to_the_agent_which_sends_the_marks_again():
+    class SecondBusy(FakeSam):  # the crop mark answers, the first weed mark times out
+        def segment_boxes(self, image, boxes):
+            if len(self.calls) == 1:
+                self.calls.append(("boxes", tuple(boxes)))
+                raise TimeoutError("busy")
+            return super().segment_boxes(image, boxes)
+
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", [MARK_WEEDS], ""), LlmTurn("r3", [MARK_WEEDS], ""),
+                   LlmTurn("r4", [_classify("s0-i3", "s0-i4"), *_close()], "")])
+    result, state = _run(llm, sam=SecondBusy())
+    told = next(p["output"] for p in llm.requests[2]["input"] if p.get("type") == "function_call_output")
+    assert told.startswith("error: SAM is busy or timed out") and "send it again" in told
+    assert result.status == "ok" and result.weed_count == 2 and state.finished and state.sam_unavailable == 1
 
 
 def test_measure_and_finish_run_last_whatever_order_the_model_lists_them():
