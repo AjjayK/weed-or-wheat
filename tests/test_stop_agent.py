@@ -380,6 +380,7 @@ def test_instructions_ask_for_every_weed_not_a_sample():
 def test_instructions_guard_against_over_marking_and_keep_calls_for_the_end():
     corn = stop_instructions("corn", ["field_horsetail"], 30)
     assert corn.count("Never box crop, soil or residue") >= 2 and "your estimate was high" in corn
+    assert "call survey again" in corn  # the stored estimate is what marks are checked against
     assert "keep your last 4" in corn and "together in one turn" in corn and "even if it is not corn" in corn
     assert 'classify it as role "crop" or "ignore"' in corn and "Don't also box plants inside a weed area" in corn
     alfalfa = stop_instructions("alfalfa", ["dandelion"], 30)

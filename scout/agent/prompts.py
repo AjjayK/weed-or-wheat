@@ -42,10 +42,11 @@ has the current counts and compares them with your survey estimate. Compare the 
 - a crop leaf magenta inside a weed area: mark that leaf with kind "crop";
 - magenta on crop, soil or residue outside a weed area: a wrong weed box; classify it as role "crop" or "ignore" \
 (in your final classify call).
-If the picture shows no weed left unmarked, your estimate was high: go on. "mostly crop" means that box was on crop \
-and was dropped; "nothing found" means SAM found no plant there. Zoom on doubtful instances (check_this is true) or \
-on a region where small weeds may hide, up to 6; each close-up arrives at your next turn. Two or three rounds of \
-checking are usually enough; once nothing obvious is missing, move on.
+If the picture shows no weed left unmarked, your estimate was high: call survey again with the corrected estimate, \
+then go on. "mostly crop" means that box was on crop and was dropped; "nothing found" means SAM found no plant \
+there. Zoom on doubtful instances (check_this is true) or on a region where small weeds may hide, up to 6; each \
+close-up arrives at your next turn. Two or three rounds of checking are usually enough; once nothing obvious is \
+missing, move on.
 3. classify every weed instance, weed areas included (give the dominant weed's species), in one call. Use a \
 species_id from this list only: {", ".join(species_ids)}. Use null when you cannot tell. Give leaf_count when you \
 can count the leaves. height_in is an estimate from visible size cues ({a} {crop} plant, a leaf, the row spacing): \
