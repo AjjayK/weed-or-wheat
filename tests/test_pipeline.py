@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 
 from scout.agent.state import StopState
@@ -9,9 +10,10 @@ from scout.models import StopResult
 from tests.helpers import FakeLlm, make_image, small_weedbook
 
 
-def fake_runner(image, crop, llm, sam, weeds, settings, on_step=None):
-    state = StopState(image, crop, on_step=on_step)
-    state.log("segment", "fake step")
+def fake_runner(image, crop, llm, sam, weeds, settings, on_step=None, picture_sink=None):
+    state = StopState(image, crop, on_step=on_step, picture_sink=picture_sink)
+    state.log("think", "Looking over the rows", detail=["Counting weeds"])
+    state.log("mark", "Mark weed: 1 of 1 boxes kept", picture=image.work)
     return StopResult(stop_index=image.index, image_hash=image.hash, species={"waterhemp": 1},
                       species_cover_pct={"waterhemp": 1.0}, weed_cover_pct=1.0, weed_count=1), state
 
@@ -45,6 +47,7 @@ def test_walk_where_every_stop_fails_is_failed_and_not_cached(tmp_path):
     pipeline.run(walk, images)
     assert walk.status == "failed" and walk.events[-1]["type"] == "error"
     assert pipeline.cached(walk.id) is None  # a retry must run the stops again, not replay the outage
+    assert not (tmp_path / "store" / walk.id / "events.json").exists()
 
 
 def test_failed_stop_does_not_sink_walk(tmp_path):
@@ -100,3 +103,57 @@ def test_from_settings_warns_when_label_table_is_empty(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="scout.app.pipeline"):
         Pipeline.from_settings(Settings(api_key="t"))
     assert "label table is empty" in caplog.text
+
+
+def test_events_tell_the_whole_walk_with_pictures_and_time(tmp_path):
+    images = [make_image(index=0), make_image(index=1, color=(10, 10, 10))]
+    pipeline = _pipeline(tmp_path, fake_runner)
+    walk = Walk(id=walk_id_for("soybean", images), crop="soybean")
+    pipeline.run(walk, images, names=["a.jpg", "b.jpg"])
+    events = walk.events
+    assert all("t" in e for e in events)
+    first = events[0]
+    assert first["type"] == "walk_start" and first["crop"] == "soybean"
+    assert first["stops"] == [{"stop": 0, "name": "a.jpg"}, {"stop": 1, "name": "b.jpg"}]
+    assert first["budget"] == {"calls": 30, "seconds": 360.0}
+    starts = [e for e in events if e["type"] == "stop_start"]
+    assert len(starts) == 2 and all(e["picture"].startswith(f"/walks/{walk.id}/steps/s") for e in starts)
+    thoughts = [e for e in events if e["type"] == "thought"]
+    assert thoughts[0]["text"] == "Looking over the rows" and thoughts[0]["detail"] == ["Counting weeds"]
+    marks = [e for e in events if e["type"] == "step"]
+    assert len(marks) == 2 and all(e["picture"].endswith(".jpg") and e["tool"] == "mark" for e in marks)
+    done = [e for e in events if e["type"] == "stop_done"]
+    assert {e["status"] for e in done} == {"ok"} and all(e["cover"] == 1.0 and e["weeds"] == 1 for e in done)
+    assert all(e["picture"].endswith(".jpg") for e in done)
+    assert [e["type"] for e in events][-2:] == ["report_building", "report_ready"]
+    folder = pipeline.find_dir(walk.id)
+    assert sorted(p.name for p in (folder / "steps").iterdir()) == [
+        "s0-00.jpg", "s0-01.jpg", "s0-02.jpg", "s1-00.jpg", "s1-01.jpg", "s1-02.jpg"]
+    saved = json.loads((folder / "events.json").read_text(encoding="utf-8"))
+    assert saved == events and pipeline.saved_events(walk.id) == events
+
+
+def test_step_pictures_are_found_by_valid_name_only(tmp_path):
+    images = [make_image(index=0)]
+    pipeline = _pipeline(tmp_path, fake_runner)
+    walk = Walk(id=walk_id_for("soybean", images), crop="soybean")
+    pipeline.run(walk, images)
+    assert pipeline.step_picture(walk.id, "s0-01.jpg").is_file()
+    for bad in ("s0-99.jpg", "../report.json", "s0-01.png", "x.jpg"):
+        assert pipeline.step_picture(walk.id, bad) is None
+    assert pipeline.step_picture("not-a-walk", "s0-01.jpg") is None
+
+
+def test_samples_carry_a_thumbnail_the_stop_count_and_the_decision(tmp_path):
+    images = [make_image(index=0)]
+    pipeline = _pipeline(tmp_path, fake_runner)
+    walk = Walk(id=walk_id_for("soybean", images), crop="soybean")
+    pipeline.run(walk, images)
+    demo = tmp_path / "demo"
+    demo.mkdir()
+    (tmp_path / "store" / walk.id).rename(demo / walk.id)
+    (demo / "samples.json").write_text(json.dumps([{"walk_id": walk.id, "name": "Soybean, waterhemp"}]))
+    [sample] = pipeline.samples()
+    assert sample["name"] == "Soybean, waterhemp" and sample["stops"] == 1
+    assert sample["thumbnail"] == f"/walks/{walk.id}/steps/s0-00.jpg"
+    assert sample["decision"] == "No action"  # small_weedbook's waterhemp: 1% cover against the 5% tool default
