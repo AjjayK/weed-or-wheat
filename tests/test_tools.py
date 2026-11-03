@@ -425,6 +425,55 @@ def test_a_timed_out_chunk_names_its_boxes_and_registers_nothing_from_the_chunks
     assert state.instances == {} and state.sam_unavailable == 1
 
 
+class _Flaky(FakeSam):
+    """Box requests time out while down is set; the test flips it."""
+
+    down = False
+
+    def segment_boxes(self, image, boxes):
+        if self.down:
+            raise TimeoutError("timed out")
+        return super().segment_boxes(image, boxes)
+
+
+def test_only_consecutive_sam_failures_end_the_stop():
+    sam = _Flaky()
+    runner, state = _runner(sam)
+    args = {"kind": "weed", "boxes": [{"box": WEED_A, "label": "w"}]}
+    sam.down = True
+    for _ in range(2):
+        assert runner.run("mark", args).output.startswith("error: SAM is busy")
+    assert state.sam_unavailable == 2
+    sam.down = False
+    assert "weeds_marked" in runner.run("mark", args).output  # SAM answered: the run of failures is over
+    assert state.sam_unavailable == 0
+    sam.down = True
+    for _ in range(2):
+        assert runner.run("mark", args).output.startswith("error: SAM is busy")  # alive: only 2 in a row
+    assert state.sam_unavailable == 2
+    with pytest.raises(StopFailed):
+        runner.run("mark", args)  # the third in a row
+
+
+def test_a_segment_that_gets_an_answer_also_ends_the_run_of_failures():
+    sam = _Unavailable()
+    runner, state = _runner(sam)
+    assert runner.run("segment", {"phrase": "dandelion", "kind": "weed"}).output.startswith("error: SAM is busy")
+    assert state.sam_unavailable == 1
+    sam.segment_concept = lambda image, phrase: []  # SAM is back
+    assert json.loads(runner.run("segment", {"phrase": "dandelion", "kind": "weed"}).output)["total_found"] == 0
+    assert state.sam_unavailable == 0
+
+
+def test_a_mark_that_never_asks_sam_does_not_end_the_run_of_failures():
+    sam = _Unavailable()
+    runner, state = _runner(sam)
+    runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "w"}]})
+    assert state.sam_unavailable == 1
+    runner.run("mark", {"kind": "patch", "boxes": [{"box": PATCH, "label": "p"}]})  # measured from pixels, no SAM
+    assert state.sam_unavailable == 1
+
+
 def test_a_segment_that_cannot_reach_sam_is_the_same_kind_of_error():
     runner, state = _runner(_Unavailable())
     out = runner.run("segment", {"phrase": "dandelion", "kind": "weed"}).output

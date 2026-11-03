@@ -27,7 +27,7 @@ MAX_LISTED = 100
 SAM_WORKERS = 4  # SAM requests in flight per mark call
 MAX_ESTIMATE = 1000  # the survey's weed estimate is capped here
 OVERLAY_QUALITY = 80  # JPEG quality of the picture sent back after a mark
-SAM_UNAVAILABLE_LIMIT = 3  # SAM busy or timing out this many times in one stop ends the stop
+SAM_UNAVAILABLE_LIMIT = 3  # SAM busy or timing out this many calls in a row ends the stop
 NOTHING = "nothing found"
 MOSTLY_CROP_NOTE = "mostly crop"
 PATCH_NOTE = "large patch; counted as one, approximate"
@@ -202,6 +202,7 @@ class ToolRunner:
 
         with ThreadPoolExecutor(max_workers=min(SAM_WORKERS, len(chunks))) as pool:
             answers = list(pool.map(ask, starts, chunks))
+        self.state.sam_unavailable = 0  # every request answered: only failures in a row count
         records: dict[str, SamRecord] = {}
         unexpected = []
         for start, chunk, answer in zip(starts, chunks, answers):
@@ -277,6 +278,7 @@ class ToolRunner:
         except Exception as error:
             log.warning("SAM did not answer segment %r", phrase, exc_info=True)
             raise SamUnavailable(type(error).__name__) from error
+        self.state.sam_unavailable = 0
         for n, record in enumerate(records, start=1):
             inst, note = self._add(record, kind, "concept", phrase)
             if inst is not None:

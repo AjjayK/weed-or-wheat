@@ -241,7 +241,8 @@ def test_a_sam_timeout_is_told_to_the_agent_which_sends_the_marks_again():
     result, state = _run(llm, sam=SecondBusy())
     told = next(p["output"] for p in llm.requests[2]["input"] if p.get("type") == "function_call_output")
     assert told.startswith("error: SAM is busy or timed out") and "send it again" in told
-    assert result.status == "ok" and result.weed_count == 2 and state.finished and state.sam_unavailable == 1
+    assert result.status == "ok" and result.weed_count == 2 and state.finished
+    assert state.sam_unavailable == 0  # the resent mark got through, which ended the run of failures
 
 
 def test_measure_and_finish_run_last_whatever_order_the_model_lists_them():
