@@ -2,6 +2,8 @@ import hashlib
 import json
 import logging
 
+from PIL import Image
+
 from scout.agent.state import StopState
 from scout.app import pipeline as pipeline_module
 from scout.app.pipeline import Pipeline, Walk, walk_id_for
@@ -62,6 +64,9 @@ def test_failed_stop_does_not_sink_walk(tmp_path):
     pipeline.run(walk, images)
     assert walk.status == "done" and [s.status for s in walk.report.stops] == ["ok", "failed"]
     assert pipeline.cached(walk.id) is not None
+    done = {e["stop"]: e for e in walk.events if e["type"] == "stop_done"}
+    assert done[1]["status"] == "failed" and done[1]["picture"] is None
+    assert done[0]["status"] == "ok" and done[0]["picture"] is not None
 
 
 def test_cache_hit_does_not_run_the_stops(tmp_path):
@@ -115,7 +120,8 @@ def test_events_tell_the_whole_walk_with_pictures_and_time(tmp_path):
     first = events[0]
     assert first["type"] == "walk_start" and first["crop"] == "soybean"
     assert first["stops"] == [{"stop": 0, "name": "a.jpg"}, {"stop": 1, "name": "b.jpg"}]
-    assert first["budget"] == {"calls": 30, "seconds": 360.0}
+    settings = Settings(api_key="t")
+    assert first["budget"] == {"calls": settings.max_tool_calls, "seconds": settings.stop_timeout_s}
     starts = [e for e in events if e["type"] == "stop_start"]
     assert len(starts) == 2 and all(e["picture"].startswith(f"/walks/{walk.id}/steps/s") for e in starts)
     thoughts = [e for e in events if e["type"] == "thought"]
@@ -177,3 +183,62 @@ def test_walk_still_finishes_when_its_replay_events_cannot_be_saved(tmp_path, mo
     folder = tmp_path / "store" / walk.id
     assert (folder / "report.json").exists() and not (folder / "events.json").exists()
     assert "replay events could not be saved" in caplog.text
+
+
+def test_step_pictures_are_found_before_the_report_exists_and_in_the_demo_folder(tmp_path):
+    pipeline = _pipeline(tmp_path, fake_runner)
+    running, shipped = "a" * 16, "b" * 16
+    for base, walk_id in ((tmp_path / "store", running), (tmp_path / "demo", shipped)):
+        (base / walk_id / "steps").mkdir(parents=True)
+        (base / walk_id / "steps" / "s0-00.jpg").write_bytes(b"jpeg")
+    assert pipeline.find_dir(running) is None  # a running walk has no report yet
+    assert pipeline.step_picture(running, "s0-00.jpg") == tmp_path / "store" / running / "steps" / "s0-00.jpg"
+    assert pipeline.step_picture(shipped, "s0-00.jpg") == tmp_path / "demo" / shipped / "steps" / "s0-00.jpg"
+    assert pipeline.step_picture(running, "s0-01.jpg") is None
+
+
+def test_a_cached_run_leaves_the_saved_events_alone(tmp_path):
+    images = [make_image(index=0)]
+    pipeline = _pipeline(tmp_path, fake_runner)
+    first = Walk(id=walk_id_for("corn", images), crop="corn")
+    pipeline.run(first, images)
+    saved = tmp_path / "store" / first.id / "events.json"
+    before = saved.read_bytes()
+    again = Walk(id=first.id, crop="corn")
+    pipeline.run(again, images)
+    assert saved.read_bytes() == before
+    assert again.status == "done" and [e["type"] for e in again.events] == ["report_ready"]
+
+
+def test_pictures_that_cannot_be_saved_leave_the_events_without_pictures(tmp_path, monkeypatch):
+    real_save = Image.Image.save
+
+    def save(self, fp, format=None, **params):
+        if format == "JPEG":
+            raise OSError("disk full")
+        return real_save(self, fp, format, **params)
+
+    monkeypatch.setattr(Image.Image, "save", save)
+    images = [make_image(index=0)]
+    pipeline = _pipeline(tmp_path, fake_runner)
+    walk = Walk(id=walk_id_for("soybean", images), crop="soybean")
+    pipeline.run(walk, images)
+    assert walk.status == "done"
+    for kind in ("stop_start", "step", "stop_done"):
+        [event] = [e for e in walk.events if e["type"] == kind]
+        assert event["picture"] is None, kind
+    assert list((tmp_path / "store" / walk.id / "steps").iterdir()) == []
+    assert (tmp_path / "store" / walk.id / "stop_0.png").exists()  # the PNG overlay is not a step picture
+
+
+def test_every_picture_in_the_events_can_be_fetched(tmp_path):
+    images = [make_image(index=0), make_image(index=1, color=(10, 10, 10))]
+    pipeline = _pipeline(tmp_path, fake_runner)
+    walk = Walk(id=walk_id_for("soybean", images), crop="soybean")
+    pipeline.run(walk, images)
+    urls = [e["picture"] for e in walk.events if e.get("picture")]
+    assert len(urls) == 6
+    for url in urls:
+        prefix, name = url.rsplit("/", 1)
+        assert prefix == f"/walks/{walk.id}/steps"
+        assert pipeline.step_picture(walk.id, name).is_file(), url
