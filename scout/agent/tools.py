@@ -337,7 +337,8 @@ class ToolRunner:
         for inst, role, species, confidence, height, leaves in resolved:
             inst.role, inst.species_id, inst.id_confidence = role, species, confidence
             inst.height_in, inst.leaf_count = height, leaves
-            inst.check_this = confidence == "low" or self.state.is_patch(inst)  # a confident verdict clears the flag
+            # a confident verdict clears the flag; a big SAM mask may be crop, but a weed area is meant to be big
+            inst.check_this = confidence == "low" or (inst.source != "patch" and self.state.is_patch(inst))
         weeds = [inst for inst, role, *_ in resolved if role == "weed"]
         if len(resolved) == 1 and weeds:
             inst = weeds[0]

@@ -147,6 +147,17 @@ def test_a_confident_verdict_clears_the_check_flag_but_patches_stay_flagged():
     assert [state.instances[i].check_this for i in ("s0-i2", "s0-i3", "s0-i4")] == [False, True, True]
 
 
+def test_a_big_weed_area_is_not_flagged_for_its_size():
+    runner, state = _runner()  # an all-green photo: a quarter of it is one weed area
+    out = _mark(runner, "patch", [0, 0, 500, 500])
+    area = state.instances[out["found"][0]["id"]]
+    assert area.area_px == 2500 and state.is_patch(area)
+    runner.run("classify", {"items": [_verdict(area.id, confidence="medium")]})
+    assert area.check_this is False  # its blue outline stays visible instead of a yellow check box
+    runner.run("classify", {"items": [_verdict(area.id, confidence="low")]})
+    assert area.check_this is True
+
+
 def test_finish_tidies_stage_and_notes():
     runner, state = _runner()
     runner.run("measure", {"view_type": "close_up"})
