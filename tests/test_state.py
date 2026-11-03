@@ -174,6 +174,15 @@ def test_weed_area_on_the_row_or_on_bare_soil_is_refused():
     assert state.patch_boxes == {}
 
 
+def test_a_weed_area_cannot_cover_most_of_the_photo():
+    state = StopState(field_photo(), "soybean")
+    note = ("too big: a weed area is one patch of dense weeds near the camera, at most about a third of the photo")
+    assert state.add_patch((0, 0, 100, 60), "far field") == (None, note)
+    assert state.patch_boxes == {}
+    inst, note = state.add_patch((50, 50, 90, 90), "horsetail")  # 16% of the frame still passes
+    assert note is None and inst is not None
+
+
 def test_alfalfa_weed_area_on_crop_is_refused_without_row_wording():
     state = StopState(field_photo(), "alfalfa")
     state.add_mask(rect(10, 0, 30, 100), "prompt", "alfalfa", role="crop")

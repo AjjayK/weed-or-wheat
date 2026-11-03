@@ -29,7 +29,7 @@ _WALK_ID = re.compile(r"[0-9a-f]{16}")
 STEP_NAME = re.compile(r"s[0-9]{1,2}-[0-9]{2,3}\.jpg")  # step picture file names; the route serves nothing else
 STEP_MAX_PX = 1024
 STEP_QUALITY = 80
-WALK_VERSION = "2"  # bump when the agent or rules change, so old cached reports aren't served for new runs
+WALK_VERSION = "3"  # bump when the agent or rules change, so old cached reports aren't served for new runs
 log = logging.getLogger(__name__)
 
 

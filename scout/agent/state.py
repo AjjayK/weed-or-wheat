@@ -30,6 +30,7 @@ PATCH_MOSTLY_CROP = 0.5  # a patch this much on any crop (canopy too) is crop fo
 MAX_BOXES = 16  # SAM takes at most 16 objects per request
 MAX_MARK_BOXES = 120  # one mark call; code splits it into SAM requests of MAX_BOXES
 PATCH_BOX_MOSTLY_CROP = 0.5  # a weed-area box this much on crop is a box around the row: refused
+PATCH_MAX_FRAC = 0.35  # a weed area is one patch of dense weeds near the camera, never the far field
 UNMARKED_SHARE = 0.8  # marking fewer plants than this share of the agent's own estimate suggests weeds were missed
 
 
@@ -179,6 +180,10 @@ class StopState:
     def add_patch(self, box: Box, label: str) -> tuple[Instance | None, str | None]:
         """Register a weed area measured from green pixels, or say why not."""
         left, top, right, bottom = box
+        width, height = self.size
+        if (right - left) * (bottom - top) > PATCH_MAX_FRAC * width * height:
+            return None, ("too big: a weed area is one patch of dense weeds near the camera, "
+                          "at most about a third of the photo")
         crop = self._crop_for_areas()
         if crop[top:bottom, left:right].mean() > PATCH_BOX_MOSTLY_CROP:
             if self.crop == "alfalfa":  # solid-seeded: there are no rows to box between

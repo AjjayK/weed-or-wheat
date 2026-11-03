@@ -31,9 +31,9 @@ not a sample (up to {MAX_MARK_BOXES} per mark call; call mark again for more). L
 leaves apart from the crop. A distinctive flowering weed can also be found by phrase: segment "dandelion" or \
 "yellow flower" with kind "weed".
 - mark with kind "patch" (a weed area) where weeds grow too densely or are too small to box one by one (a carpet \
-of shoots, a mat of seedlings): one box around each such area, holding weeds and soil and as little crop or other \
-green (trees, grass margins) as possible. Code measures it as green pixels that are not crop. Don't also box \
-plants inside a weed area.
+of shoots, a mat of seedlings): one box around each such area near the camera, at most about a third of the photo, \
+never the far field, holding weeds and soil and as little crop or other green (trees, grass margins) as possible. \
+Code measures it as green pixels that are not crop. Don't also box plants inside a weed area.
 - If you see no weeds, skip the weed and patch marks.
 
 Never box crop, soil or residue as a weed.
