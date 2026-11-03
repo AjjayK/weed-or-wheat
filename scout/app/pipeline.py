@@ -149,7 +149,10 @@ class Pipeline:
             walk.report = report
             walk.emit({"type": "report_ready"})
             if fresh:  # the saved feed is what a replay plays back
-                _write_atomic(self.store_dir / walk.id / "events.json", json.dumps(walk.events))
+                try:
+                    _write_atomic(self.store_dir / walk.id / "events.json", json.dumps(walk.events))
+                except Exception:  # the report is cached: losing the replay must not fail the walk
+                    log.warning("replay events could not be saved", exc_info=True)
             walk.status = "done"
         except Exception as error:
             log.exception("walk %s failed", walk.id)

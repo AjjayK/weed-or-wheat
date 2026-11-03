@@ -157,3 +157,23 @@ def test_samples_carry_a_thumbnail_the_stop_count_and_the_decision(tmp_path):
     assert sample["name"] == "Soybean, waterhemp" and sample["stops"] == 1
     assert sample["thumbnail"] == f"/walks/{walk.id}/steps/s0-00.jpg"
     assert sample["decision"] == "No action"  # small_weedbook's waterhemp: 1% cover against the 5% tool default
+
+
+def test_walk_still_finishes_when_its_replay_events_cannot_be_saved(tmp_path, monkeypatch, caplog):
+    real_write = pipeline_module._write_atomic
+
+    def write(path, text):
+        if path.name == "events.json":
+            raise OSError("disk full")
+        real_write(path, text)
+
+    monkeypatch.setattr(pipeline_module, "_write_atomic", write)
+    images = [make_image(index=0)]
+    pipeline = _pipeline(tmp_path, fake_runner)
+    walk = Walk(id=walk_id_for("soybean", images), crop="soybean")
+    with caplog.at_level(logging.WARNING, logger="scout.app.pipeline"):
+        pipeline.run(walk, images)
+    assert walk.status == "done" and walk.events[-1]["type"] == "report_ready"
+    folder = tmp_path / "store" / walk.id
+    assert (folder / "report.json").exists() and not (folder / "events.json").exists()
+    assert "replay events could not be saved" in caplog.text
