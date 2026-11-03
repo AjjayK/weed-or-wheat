@@ -201,16 +201,15 @@ class ToolRunner:
     def _feedback(self, out: dict, kind: str) -> ToolResult:
         """Counts against the survey estimate, a hint when weed marks fall short of it, and a picture of the marks."""
         plants, areas = self.state.weeds_marked()
-        out["weeds_marked"] = {"plants": plants, "patches": areas}
+        out["weeds_marked"] = {"plants": plants, "weed_areas": areas}
         estimate = self.state.weeds_estimate
         if estimate is not None:
             out["weeds_estimate"] = estimate
-            counted = self.state.plants_marked()  # boxed plants plus the pieces inside weed areas
-            if kind != "crop" and counted < UNMARKED_SHARE * estimate:
-                parts = _plural(plants, "boxed plant")
-                if areas:
-                    parts += f" and {_plural(areas, 'weed area')} holding about {counted - plants}"
-                out["hint"] = (f"You estimated {estimate} weeds; your marks count as about {counted}: {parts}. "
+            counted = self.state.plants_marked()
+            # like the final check, no hint once a weed area exists: its pieces are not plant counts
+            if kind != "crop" and not self.state.has_weed_area() and counted < UNMARKED_SHARE * estimate:
+                out["hint"] = (f"You estimated {estimate} weeds; your marks count as about {counted}: "
+                               f"{_plural(plants, 'boxed plant')}. "
                                "Mark the rest: more boxes, or kind patch where they are too dense.")
         try:
             images = [(OVERLAY_CAPTION, to_data_url(self.state.overlay(), quality=OVERLAY_QUALITY))]

@@ -265,13 +265,13 @@ def test_mark_answers_with_counts_a_hint_and_a_picture():
     runner.run("survey", {"crop_seen": "soybean", "weeds_visible": 2})
     result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "waterhemp"}]})
     out = json.loads(result.output)
-    assert out["weeds_marked"] == {"plants": 1, "patches": 0} and out["weeds_estimate"] == 2
+    assert out["weeds_marked"] == {"plants": 1, "weed_areas": 0} and out["weeds_estimate"] == 2
     assert out["hint"] == ("You estimated 2 weeds; your marks count as about 1: 1 boxed plant. Mark the rest: more "
                            "boxes, or kind patch where they are too dense.")
     assert [caption for caption, _ in result.images] == [OVERLAY_CAPTION]
     assert result.images[0][1].startswith("data:image/jpeg;base64,")
     out = _mark(runner, "weed", WEED_B)
-    assert out["weeds_marked"] == {"plants": 2, "patches": 0} and "hint" not in out
+    assert out["weeds_marked"] == {"plants": 2, "weed_areas": 0} and "hint" not in out
 
 
 def test_patch_kind_measures_green_pixels_and_follows_the_crop():
@@ -282,7 +282,7 @@ def test_patch_kind_measures_green_pixels_and_follows_the_crop():
     assert [(f["box_no"], f["plants"], f["area_pct"]) for f in out["found"]] == [(1, 2, 2.0)]
     assert out["notes"] == ["box 2: mostly crop: box the weeds between the rows, not the row",
                             "box 3: no green weed pixels in this area"]
-    assert out["weeds_marked"] == {"plants": 0, "patches": 1}
+    assert out["weeds_marked"] == {"plants": 0, "weed_areas": 1}
     assert state.steps[-1].summary == "Mark patch: 1 of 3 areas kept"
     assert ("boxes", ((50, 50, 90, 90),)) not in sam.calls  # weed areas never go to SAM
     _mark(runner, "crop", [700, 600, 750, 800])  # a crop leaf over the second shoot
@@ -299,14 +299,16 @@ def test_finish_records_whether_every_weed_is_marked():
     assert state.all_weeds_marked is None  # only a real true or false counts
 
 
-def test_the_hint_counts_weed_area_pieces_and_says_so():
-    runner, state = _runner(FakeSam(scene={"row": rect(10, 0, 30, 100)}), image=field_photo())
+def test_no_hint_once_a_weed_area_exists_because_its_pieces_are_not_plant_counts():
+    scene = {"row": rect(10, 0, 30, 100), "weed": rect(80, 10, 90, 20)}
+    runner, state = _runner(FakeSam(scene=scene), image=field_photo())
     _mark(runner, "crop", ROW)
     runner.run("survey", {"crop_seen": "soybean", "weeds_visible": 10})
     out = _mark(runner, "patch", [500, 500, 900, 900])
-    assert out["weeds_marked"] == {"plants": 0, "patches": 1}
-    assert out["hint"] == ("You estimated 10 weeds; your marks count as about 2: 0 boxed plants and 1 weed area "
-                           "holding about 2. Mark the rest: more boxes, or kind patch where they are too dense.")
+    assert out["weeds_marked"] == {"plants": 0, "weed_areas": 1} and out["weeds_estimate"] == 10
+    assert "hint" not in out  # the final check skips the estimate here too
+    out = _mark(runner, "weed", WEED_B)
+    assert out["weeds_marked"] == {"plants": 1, "weed_areas": 1} and "hint" not in out
 
 
 def test_a_crop_mark_never_gets_the_weed_hint():
@@ -314,7 +316,7 @@ def test_a_crop_mark_never_gets_the_weed_hint():
     runner.run("survey", {"crop_seen": "soybean", "weeds_visible": 10})
     out = _mark(runner, "crop", ROW)
     assert "hint" not in out and out["weeds_estimate"] == 10
-    assert out["weeds_marked"] == {"plants": 0, "patches": 0}
+    assert out["weeds_marked"] == {"plants": 0, "weed_areas": 0}
 
 
 def test_a_failed_overlay_leaves_a_warning_and_a_note_but_the_counts_stand(monkeypatch, caplog):
@@ -327,7 +329,7 @@ def test_a_failed_overlay_leaves_a_warning_and_a_note_but_the_counts_stand(monke
     with caplog.at_level(logging.WARNING, logger="scout.agent.tools"):
         result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "waterhemp"}]})
     out = json.loads(result.output)
-    assert out["picture"] == "unavailable" and out["weeds_marked"] == {"plants": 1, "patches": 0}
+    assert out["picture"] == "unavailable" and out["weeds_marked"] == {"plants": 1, "weed_areas": 0}
     assert result.images == []
     assert [r.getMessage() for r in caplog.records] == ["overlay picture failed"]
     assert caplog.records[0].exc_info is not None
