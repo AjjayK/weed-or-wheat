@@ -2,6 +2,8 @@
 const $ = (id) => document.getElementById(id);
 const MAX_PHOTOS = 10;
 const MAX_BYTES = 25_000_000;
+const MAX_TOTAL_BYTES = 30_000_000; // the upload is one request, and the host (Cloud Run) refuses one over 32 MiB
+const TOO_MUCH = "The photos total over 30 MB. Pick fewer photos for this walk.";
 const FOLLOW_HOLD_MS = 6000; // the live view stays on one photo until it has been quiet this long
 const PHASES = [["survey", "Survey"], ["crop", "Crop"], ["weeds", "Weeds"], ["check", "Check the picture"],
                 ["zoom", "Zoom"], ["name", "Name the weeds"], ["measure", "Measure"]];
@@ -69,6 +71,7 @@ form.addEventListener("submit", async (event) => {
   if (chosen.length > MAX_PHOTOS) return showError(`That's ${chosen.length} photos; the limit is ${MAX_PHOTOS}.`);
   const big = chosen.find((f) => f.size > MAX_BYTES);
   if (big) return showError(`${big.name} is over 25 MB.`);
+  if (chosen.reduce((sum, f) => sum + f.size, 0) > MAX_TOTAL_BYTES) return showError(TOO_MUCH);
   const body = new FormData();
   body.append("crop", crop);
   for (const file of chosen) body.append("files", file, file.name);
@@ -78,7 +81,8 @@ form.addEventListener("submit", async (event) => {
     const response = await fetch("/walks", { method: "POST", body });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      showError(typeof data.detail === "string" ? data.detail : "Upload failed. Try again.");
+      const fallback = response.status === 413 ? TOO_MUCH : "Upload failed. Try again.";
+      showError(typeof data.detail === "string" ? data.detail : fallback);
       return;
     }
     openLive(data.walk_id, crop, true);
