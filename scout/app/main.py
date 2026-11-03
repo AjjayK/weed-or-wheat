@@ -143,7 +143,8 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
 
     @app.get("/walks/{walk_id}/report", response_class=HTMLResponse)
     def report_page(walk_id: str):
-        return report_html(report_for(walk_id), pipeline.weeds, lambda i: f"/walks/{walk_id}/overlay/{i}.png")
+        return report_html(report_for(walk_id), pipeline.weeds, lambda i: f"/walks/{walk_id}/overlay/{i}.png",
+                           lambda name: f"/walks/{walk_id}/steps/{name}")
 
     @app.get("/walks/{walk_id}/report.json")
     def report_json(walk_id: str):

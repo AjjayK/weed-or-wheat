@@ -1,7 +1,7 @@
 import re
 
 from scout.labels.epa import PDF_BASE
-from scout.models import FieldReport, LabelOption, SpeciesSummary, StopResult, UseRecord
+from scout.models import AgentStep, FieldReport, LabelOption, SpeciesSummary, StopResult, UseRecord
 from scout.report.render import CSV_COLUMNS, decision_text, report_csv, report_html
 from tests.helpers import small_weedbook
 
@@ -115,3 +115,21 @@ def test_legend_explains_blue_weed_areas():
 
 def test_warning_keeps_its_fill_when_printed():
     assert re.search(r"@media print \{.*\.warning \{[^}]*print-color-adjust: exact", _html(_report()))
+
+
+def test_decision_card_rules_and_the_agents_timeline():
+    report = _report()
+    report.stops[0].steps = [
+        AgentStep(t_ms=10, tool="think", summary="Scouting the rows.", detail=["Counting weeds"]),
+        AgentStep(t_ms=20, tool="mark", summary="Mark weed: 2 of 2 boxes kept", picture="s0-01.jpg")]
+    html = report_html(report, small_weedbook(), lambda i: f"/o/{i}.png", lambda name: f"/walks/w1/steps/{name}")
+    assert 'class="decision treat"' in html and "How the rules decided" in html and "How the agent worked" in html
+    assert "Scouting the rows." in html and "Mark weed: 2 of 2 boxes kept" in html
+    assert 'src="/walks/w1/steps/s0-01.jpg"' in html
+
+
+def test_reports_without_step_pictures_still_render():
+    report = _report()
+    report.stops[0].steps = [AgentStep(t_ms=1, tool="mark", summary="Mark weed: 1 of 1 boxes kept")]
+    html = _html(report)
+    assert "Mark weed: 1 of 1 boxes kept" in html and "/steps/" not in html

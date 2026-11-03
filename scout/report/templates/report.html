@@ -4,39 +4,72 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Scouting report: {{ report.crop }}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Domine:wght@400..700&family=Public+Sans:ital,wght@0,400..700;1,400&display=swap">
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; background: #fafaf7; color: #1f1f1c; }
-  main { max-width: 960px; margin: 0 auto; padding: 16px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
-  .card { background: #fff; border: 1px solid #e3e1d9; border-radius: 10px; padding: 12px; }
-  .card b { display: block; font-size: 22px; font-weight: 600; }
-  .treat { background: #faeeda; } .scout_again { background: #e6f1fb; } .no_action { background: #eaf3de; }
+  :root { --page: #F5F2E8; --card: #FBFAF5; --line: #DDD8C8; --ink: #1D2A1F; --text: #3F4A3C; --muted: #5F675A;
+          --accent: #B0127F; --green: #4E7A1E; --serif: "Domine", Georgia, serif; --sans: "Public Sans", system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--text); font: 16px/1.55 var(--sans); }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1, h2, h3 { font-family: var(--serif); color: var(--ink); line-height: 1.2; margin: 28px 0 10px; }
+  h1 { font-size: clamp(26px, 4vw, 36px); margin-top: 8px; } h2 { font-size: 22px; } h3 { font-size: 17px; margin: 8px 0 4px; }
+  a { color: var(--accent); }
+  .kicker { font-size: 13px; letter-spacing: 3px; text-transform: uppercase; color: var(--accent); font-weight: 600; margin: 0; }
+  .nav { display: flex; gap: 16px; font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+  .warning { background: #fdecc8; border: 1px solid #e0a43a; border-radius: 10px; padding: 12px; font-weight: 600; color: #633806; }
+  .decision { border-radius: 14px; padding: 18px 20px; margin: 16px 0; border: 1px solid var(--line); }
+  .decision .label { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; font-weight: 600; }
+  .decision b { display: block; font-family: var(--serif); font-size: clamp(26px, 4vw, 34px); color: var(--ink); }
+  .decision .urgency { font-weight: 600; }
+  .treat { background: #FAEEDA; } .treat .label { color: #854F0B; }
+  .scout_again { background: #E6F1FB; } .scout_again .label { color: #0C447C; }
+  .no_action { background: #EAF3DE; } .no_action .label { color: #27500A; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .metric { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font-size: 14px; color: var(--muted); }
+  .metric b { display: block; font-size: 24px; color: var(--ink); }
+  .why { font-family: var(--serif); font-size: 18px; color: var(--ink); max-width: 760px; }
+  details { margin: 8px 0; } summary { cursor: pointer; font-weight: 600; color: var(--ink); }
+  .table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  td, th { border-bottom: 1px solid #e3e1d9; padding: 6px; text-align: left; vertical-align: top; }
-  .stops { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
-  .stops img { width: 100%; border-radius: 8px; }
-  .flag { color: #a32d2d; font-size: 13px; }
-  .warning { background: #fdecc8; border: 1px solid #e0a43a; border-radius: 10px; padding: 12px; font-weight: 600; }
-  .muted { color: #6b6a63; font-size: 13px; }
-  .table-wrap { overflow-x: auto; }
-  @media print { .noprint { display: none; } .warning { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+  td, th { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; } tr:last-child td { border-bottom: 0; }
+  .flag { display: inline-block; background: #FAEEDA; color: #633806; border-radius: 6px; padding: 2px 8px; font-size: 13px; margin: 3px 4px 0 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .legend { font-size: 14px; }
+  .stops { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .stop { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+  .stop > img { width: 100%; border-radius: 10px; display: block; }
+  .timeline { list-style: none; padding: 0; margin: 8px 0 0; font-size: 13px; display: grid; gap: 6px; }
+  .timeline .think { font-family: var(--serif); font-style: italic; color: var(--ink); }
+  .timeline .tool { font-weight: 600; color: var(--ink); }
+  .timeline .detail { color: var(--muted); }
+  .timeline img { width: 64px; height: 48px; object-fit: cover; border-radius: 6px; vertical-align: middle; margin-left: 6px; }
+  .timeline .failed { color: #A32D2D; }
+  @media print { .noprint, .timeline img { display: none; } details > * { display: block; } .warning { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .decision, .flag { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
 </style>
 </head>
 <body>
 <main>
-<p class="noprint"><a href="/">New walk</a> · <a href="stops.csv">Download CSV</a> · <a href="#" onclick="window.print(); return false;">Save as PDF</a></p>
-<h1>Scouting report: {{ report.crop }}, {{ report.stops|length }} stops</h1>
+<p class="nav noprint"><a href="/">New walk</a><a href="stops.csv">Download CSV</a><a href="#" onclick="window.print(); return false;">Save as PDF</a></p>
+<p class="kicker">Weed Scout · scouting report</p>
+<h1>{{ report.crop|capitalize }} field, {{ report.stops|length }} stops</h1>
 {% if report.crop_mismatch %}<p class="warning">{{ report.crop_mismatch }}</p>{% endif %}
-<div class="cards">
-  <div class="card">Mean weed cover<b>{{ "%.1f"|format(mean_cover) }}%</b></div>
-  <div class="card">Density<b>{{ density_text }}</b></div>
-  <div class="card">Stops with weeds<b>{{ stops_with_weeds }} of {{ ok_count }}</b></div>
-  <div class="card {{ report.decision }}">Decision<b>{{ decision_text }}</b>{% if report.urgency %}<span class="muted">{{ report.urgency }}</span>{% endif %}</div>
+<div class="decision {{ report.decision }}">
+  <span class="label">Decision</span>
+  <b>{{ decision_text }}</b>
+  {% if report.urgency %}<span class="urgency">{{ report.urgency }}</span>{% endif %}
+</div>
+<div class="metrics">
+  <div class="metric">Mean weed cover<b>{{ "%.1f"|format(mean_cover) }}%</b></div>
+  <div class="metric">Density<b>{{ density_text }}</b></div>
+  <div class="metric">Stops with weeds<b>{{ stops_with_weeds }} of {{ ok_count }}</b></div>
 </div>
 
 <h2>Why</h2>
-<p>{{ report.explanation }}</p>
-<details><summary>Rule trace</summary><ul>{% for line in report.rule_trace %}<li>{{ line }}</li>{% endfor %}</ul></details>
+<p class="why">{{ report.explanation }}</p>
+<details><summary>How the rules decided</summary><ul>{% for line in report.rule_trace %}<li>{{ line }}</li>{% endfor %}</ul></details>
 
 <h2>Weeds found</h2>
 {% if report.species_summary %}
@@ -75,7 +108,7 @@
 {% set pins = report.stops | selectattr("gps") | list %}
 {% if pins %}
 <h2>Stops on the map</h2>
-<div id="map" style="height: 280px; border-radius: 10px;"></div>
+<div id="map" style="height: 280px; border-radius: 12px;"></div>
 <p class="muted">Pins are shifted for privacy.</p>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -90,16 +123,29 @@
 {% endif %}
 
 <h2>Stops</h2>
-<p>Green: crop · Magenta: weeds · Gray: in-row zone · Blue box: weed area measured by green pixels · Yellow box: check this plant</p>
+<p class="legend">Green: crop · Magenta: weeds · Gray: in-row zone · Blue box: weed area measured by green pixels · Yellow box: check this plant</p>
 <div class="stops">
 {% for s in report.stops %}
-  <div class="card">
+  <div class="stop">
     <img src="{{ overlay_url(s.stop_index) }}" alt="Stop {{ s.stop_index + 1 }}: crop in green, weeds in magenta">
-    <b>Stop {{ s.stop_index + 1 }}</b>
+    <h3>Stop {{ s.stop_index + 1 }}</h3>
     {% if s.status == "failed" %}<p class="muted">Not analyzed; not used in the field numbers.</p>{% else %}
     <span class="muted">{{ s.view_type.replace("_", " ") }}{% if s.crop_stage %} · crop {{ s.crop_stage }}{% endif %} · {{ s.status.replace("_", " ") }}</span>
     <p>Weed cover {{ s.weed_cover_pct }}% · {{ s.weed_count }} weeds{% if s.count_approximate %} (approx.){% endif %}{% if s.density_per_m2 is not none %} · {{ s.density_per_m2 }}/m²{% endif %}</p>{% endif %}
     {% for f in s.flags %}<div class="flag">{{ f }}</div>{% endfor %}
+    {% if s.steps %}
+    <details><summary>How the agent worked</summary>
+      <ol class="timeline">
+      {% for step in s.steps %}
+        {% if step.tool == "think" %}
+        <li class="think">“{{ step.summary }}”{% for line in step.detail %}<div class="detail">{{ line }}</div>{% endfor %}</li>
+        {% else %}
+        <li{% if not step.ok %} class="failed"{% endif %}><span class="tool">{{ step.tool }}</span> {{ step.summary }}{% if step.picture and step_url(step.picture) %}<img src="{{ step_url(step.picture) }}" alt="" loading="lazy">{% endif %}</li>
+        {% endif %}
+      {% endfor %}
+      </ol>
+    </details>
+    {% endif %}
   </div>
 {% endfor %}
 </div>

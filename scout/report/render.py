@@ -26,7 +26,8 @@ def decision_text(report: FieldReport) -> str:
     return OUTCOME_TEXT[report.decision] + (f" ({report.treat_mode})" if report.treat_mode else "")
 
 
-def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int], str]) -> str:
+def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int], str],
+                step_url: Callable[[str], str] | None = None) -> str:
     ok = [s for s in report.stops if s.status == "ok"]
     measured = [s for s in ok if s.view_type != "close_up"] or ok  # the stops rules.py averages
     densities = [s.density_per_m2 for s in ok if s.density_per_m2 is not None]
@@ -42,6 +43,7 @@ def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int
         names=names,
         outcome_text=OUTCOME_TEXT,
         overlay_url=overlay_url,
+        step_url=step_url or (lambda name: None),
         pdf_base=PDF_BASE,
     )
 
