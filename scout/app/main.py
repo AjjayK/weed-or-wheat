@@ -21,6 +21,8 @@ WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 CROPS = {"corn", "soybean", "alfalfa"}
 POLL_S = 0.3  # how often an event stream looks for new events
 KEEP_ALIVE_S = 15  # a Muse Spark turn can take 15+ s; a comment this often keeps proxies from closing a quiet stream
+REPLAY_SPEED = 4.0  # a saved walk replays this many times faster than it ran
+REPLAY_MAX_GAP_S = 3.0  # and never waits longer than this between two events
 
 
 def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
@@ -99,16 +101,21 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
             recent_all.append(now)
         walk = Walk(id=walk_id, crop=crop)
         walks[walk_id] = walk
-        threading.Thread(target=pipeline.run, args=(walk, images), daemon=True).start()
+        names = [upload.filename or f"Photo {index + 1}" for index, upload in enumerate(files)]
+        threading.Thread(target=pipeline.run, args=(walk, images), kwargs={"names": names}, daemon=True).start()
         return {"walk_id": walk_id}
 
     @app.get("/walks/{walk_id}/events")
     async def events(walk_id: str, request: Request):
         walk = walks.get(walk_id)
+        replaying = False
         if walk is None:
             if pipeline.cached(walk_id) is None:
                 raise HTTPException(404, "Unknown walk.")
-            walk = Walk(id=walk_id, crop="", status="done", events=[{"type": "report_ready"}])
+            saved = pipeline.saved_events(walk_id)
+            replaying = bool(saved)
+            events = [{**event, "replay": True} for event in saved] if saved else [{"type": "report_ready"}]
+            walk = Walk(id=walk_id, crop="", status="done", events=events)
         last = request.headers.get("last-event-id", "")
         start = int(last) + 1 if last.isdigit() else 0  # EventSource sends it when it reconnects: resume, don't replay
 
@@ -117,6 +124,9 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
             while True:
                 done = walk.status != "running"  # read first: events are appended before status changes
                 while sent < len(walk.events):
+                    if replaying and sent > start:  # a saved walk plays back at REPLAY_SPEED, gaps capped
+                        gap = walk.events[sent].get("t", 0) - walk.events[sent - 1].get("t", 0)
+                        await asyncio.sleep(min(max(gap, 0) / REPLAY_SPEED, REPLAY_MAX_GAP_S))
                     yield f"id: {sent}\ndata: {json.dumps(walk.events[sent])}\n\n"
                     sent += 1
                     quiet = 0.0
@@ -151,5 +161,12 @@ def create_app(pipeline=None, settings: Settings | None = None) -> FastAPI:
         if path is None or not path.exists():
             raise HTTPException(404, "No such overlay.")
         return FileResponse(path, media_type="image/png")
+
+    @app.get("/walks/{walk_id}/steps/{name}")
+    def step_picture(walk_id: str, name: str):
+        path = pipeline.step_picture(walk_id, name)
+        if path is None:
+            raise HTTPException(404, "No such picture.")
+        return FileResponse(path, media_type="image/jpeg")
 
     return app

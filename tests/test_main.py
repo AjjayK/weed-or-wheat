@@ -1,10 +1,13 @@
 import io
+import json
 import threading
 
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from scout.app import main as main_module
 from scout.app.main import create_app
+from scout.app.pipeline import STEP_NAME
 from scout.config import Settings
 from scout.models import FieldReport
 from tests.helpers import png_bytes, small_weedbook
@@ -26,7 +29,17 @@ class FakePipeline:
     def samples(self):
         return [{"name": "Sample", "walk_id": "0123456789abcdef"}]
 
-    def run(self, walk, images):
+    def saved_events(self, walk_id):
+        folder = self.find_dir(walk_id)
+        path = folder / "events.json" if folder else None
+        return json.loads(path.read_text()) if path and path.exists() else None
+
+    def step_picture(self, walk_id, name):
+        path = self.root / walk_id / "steps" / name
+        return path if STEP_NAME.fullmatch(name) and path.is_file() else None
+
+    def run(self, walk, images, names=None):
+        self.names = names
         report = FieldReport(walk_id=walk.id, crop=walk.crop, stops=[], species_summary=[], decision="no_action",
                              rule_trace=["No weeds found at any stop -> no action"],
                              explanation="Nothing to do. Read the label before use.", options=[])
@@ -63,9 +76,9 @@ def _upload_gps_photos(client):
 
 
 class GpsCapture(FakePipeline):
-    def run(self, walk, images):
+    def run(self, walk, images, names=None):
         self.gps = [image.gps for image in images]
-        super().run(walk, images)
+        super().run(walk, images, names)
 
 
 def test_walk_flow(tmp_path):
@@ -134,9 +147,9 @@ def test_idle_stream_sends_keep_alive_comments(tmp_path, monkeypatch):
     release = threading.Event()
 
     class Slow(FakePipeline):
-        def run(self, walk, images):
+        def run(self, walk, images, names=None):
             release.wait(5)
-            super().run(walk, images)
+            super().run(walk, images, names)
 
     monkeypatch.setattr("scout.app.main.KEEP_ALIVE_S", 0.3)
     client = _client(tmp_path, pipeline=Slow(tmp_path))
@@ -171,3 +184,69 @@ def test_unknown_walk_is_404_and_samples_listed(tmp_path):
 def test_crop_menu_makes_the_farmer_choose(tmp_path):
     html = _client(tmp_path).get("/").text
     assert '<option value="" disabled selected>Choose the crop</option>' in html
+
+
+def _saved_walk(root, walk_id, events):
+    folder = root / walk_id
+    (folder / "steps").mkdir(parents=True)
+    report = FieldReport(walk_id=walk_id, crop="corn", stops=[], species_summary=[], decision="no_action",
+                         rule_trace=[], explanation="x", options=[])
+    (folder / "report.json").write_text(report.model_dump_json())
+    if events is not None:
+        (folder / "events.json").write_text(json.dumps(events))
+    return folder
+
+
+def _event_data(text):
+    return [json.loads(line[len("data: "):]) for line in text.splitlines() if line.startswith("data: ")]
+
+
+def test_upload_passes_photo_names_to_the_pipeline(tmp_path):
+    pipeline = FakePipeline(tmp_path)
+    client = _client(tmp_path, pipeline)
+    walk_id = _upload(client, n=2).json()["walk_id"]
+    client.get(f"/walks/{walk_id}/events")
+    assert pipeline.names == ["p0.png", "p1.png"]
+
+
+def test_step_pictures_are_served_by_valid_name_only(tmp_path):
+    folder = _saved_walk(tmp_path, "0123456789abcdef", None)
+    (folder / "steps" / "s0-01.jpg").write_bytes(b"jpeg")
+    client = _client(tmp_path)
+    ok = client.get("/walks/0123456789abcdef/steps/s0-01.jpg")
+    assert ok.status_code == 200 and ok.headers["content-type"] == "image/jpeg" and ok.content == b"jpeg"
+    for bad in ("s0-02.jpg", "report.json", "..%2Freport.json"):
+        assert client.get(f"/walks/0123456789abcdef/steps/{bad}").status_code == 404
+    assert client.get("/walks/ffffffffffffffff/steps/s0-01.jpg").status_code == 404
+
+
+def test_a_saved_walk_replays_its_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "REPLAY_SPEED", 1e9)
+    events = [{"type": "walk_start", "crop": "corn", "stops": [{"stop": 0, "name": "a.jpg"}], "t": 0.0},
+              {"type": "stop_start", "stop": 0, "picture": None, "t": 0.5},
+              {"type": "report_ready", "t": 40.0}]
+    _saved_walk(tmp_path, "0123456789abcdef", events)
+    replayed = _event_data(_client(tmp_path).get("/walks/0123456789abcdef/events").text)
+    assert [e["type"] for e in replayed] == ["walk_start", "stop_start", "report_ready"]
+    assert all(e["replay"] is True for e in replayed)
+
+
+def test_a_saved_walk_without_events_just_reports_ready(tmp_path):
+    _saved_walk(tmp_path, "0123456789abcdef", None)
+    replayed = _event_data(_client(tmp_path).get("/walks/0123456789abcdef/events").text)
+    assert replayed == [{"type": "report_ready"}]
+
+
+def test_replay_waits_the_gap_over_the_speed_capped_and_never_negative(tmp_path, monkeypatch):
+    waits = []
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)  # a replayed walk is already done, so these are all replay pacing, no POLL_S polls
+
+    monkeypatch.setattr(main_module, "REPLAY_SPEED", 4.0)
+    monkeypatch.setattr(main_module, "REPLAY_MAX_GAP_S", 3.0)
+    monkeypatch.setattr(main_module.asyncio, "sleep", fake_sleep)
+    _saved_walk(tmp_path, "0123456789abcdef", [{"type": "thought", "t": t} for t in (0.0, 8.0, 7.9, 30.0)])
+    replayed = _event_data(_client(tmp_path).get("/walks/0123456789abcdef/events").text)
+    assert len(replayed) == 4
+    assert waits == [2.0, 0, 3.0]
