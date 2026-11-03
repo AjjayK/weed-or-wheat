@@ -2,6 +2,7 @@
 const $ = (id) => document.getElementById(id);
 const MAX_PHOTOS = 10;
 const MAX_BYTES = 25_000_000;
+const FOLLOW_HOLD_MS = 6000; // the live view stays on one photo until it has been quiet this long
 const PHASES = [["survey", "Survey"], ["crop", "Crop"], ["weeds", "Weeds"], ["check", "Check the picture"],
                 ["zoom", "Zoom"], ["name", "Name the weeds"], ["measure", "Measure"]];
 const TOOL_STEPS = new Set(["survey", "segment", "mark", "zoom", "classify", "measure", "finish"]);
@@ -183,7 +184,12 @@ $("follow-live").addEventListener("click", () => {
 });
 
 function touch(stop) {
-  if (!live.pinned) live.focus = stop.index;
+  stop.seenAt = Date.now();
+  if (!live.pinned) {
+    const current = live.stops.get(live.focus);
+    const idle = !current || current.status !== "working" || Date.now() - (current.seenAt || 0) > FOLLOW_HOLD_MS;
+    if (current === stop || idle) live.focus = stop.index;
+  }
   render();
 }
 
