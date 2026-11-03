@@ -522,3 +522,15 @@ def test_the_overlay_picture_is_a_smaller_jpeg_and_explains_the_gray_zone(monkey
     result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "waterhemp"}]})
     assert qualities == [80] and result.images == [(OVERLAY_CAPTION, "data:image/jpeg;base64,")]
     assert "magenta is weed, gray is the in-row zone, blue boxes" in OVERLAY_CAPTION
+
+
+def test_marks_and_zooms_hand_their_pictures_to_the_step():
+    saved = []
+    state = StopState(make_image(100, 100), "soybean",
+                      picture_sink=lambda image: saved.append(image) or f"s0-{len(saved):02d}.jpg")
+    runner = ToolRunner(state, FakeSam(), small_weedbook())
+    result = runner.run("mark", {"kind": "weed", "boxes": [{"box": WEED_A, "label": "w"}]})
+    assert state.steps[-1].tool == "mark" and state.steps[-1].picture == "s0-01.jpg"
+    assert saved[0].size == state.size and [c for c, _ in result.images] == [OVERLAY_CAPTION]
+    runner.run("zoom", {"instance_id": state.steps[-1].instance_ids[0]})
+    assert state.steps[-1].tool == "zoom" and state.steps[-1].picture == "s0-02.jpg"

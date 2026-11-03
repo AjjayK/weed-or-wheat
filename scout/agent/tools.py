@@ -216,7 +216,15 @@ class ToolRunner:
             self.state.log("mark", f"SAM returned unexpected object ids {unexpected[:5]}", ok=False)
         return records
 
-    def _feedback(self, out: dict, kind: str) -> ToolResult:
+    def _render_overlay(self):
+        """The marking picture, rendered once per mark: for the agent's feedback and for people watching."""
+        try:
+            return self.state.overlay()
+        except Exception:  # the picture helps; the counts in the answer still stand without it
+            log.warning("overlay picture failed", exc_info=True)
+            return None
+
+    def _feedback(self, out: dict, kind: str, picture) -> ToolResult:
         """Counts against the survey estimate, a hint when weed marks fall short of it, what is left of the budget, and
         a picture of the marks."""
         plants, areas = self.state.weeds_marked()
@@ -233,13 +241,10 @@ class ToolRunner:
                 out["hint"] = (f"You estimated {estimate} weeds; your marks count as about {counted}: "
                                f"{_plural(plants, 'boxed plant')}. "
                                "Mark the rest: more boxes, or kind patch where they are too dense.")
-        try:
-            images = [(OVERLAY_CAPTION, to_data_url(self.state.overlay(), quality=OVERLAY_QUALITY))]
-        except Exception:  # the picture helps the agent check its work; the counts above still stand without it
-            log.warning("overlay picture failed", exc_info=True)
+        if picture is None:
             out["picture"] = "unavailable"
-            images = []
-        return ToolResult(json.dumps(out), images=images)
+            return ToolResult(json.dumps(out))
+        return ToolResult(json.dumps(out), images=[(OVERLAY_CAPTION, to_data_url(picture, quality=OVERLAY_QUALITY))])
 
     def _mark_patches(self, pixel_boxes: list, labels: list[str]) -> ToolResult:
         found, notes = [], []
@@ -249,8 +254,10 @@ class ToolRunner:
                 found.append({"box_no": n, **self._brief(inst), "plants": inst.plant_count})
             if note:
                 notes.append(f"box {n}: {note}")
-        self.state.log("mark", f"Mark patch: {len(found)} of {len(pixel_boxes)} areas kept", [f["id"] for f in found])
-        return self._feedback({"found": found, "notes": notes}, "patch")
+        picture = self._render_overlay()
+        self.state.log("mark", f"Mark patch: {len(found)} of {len(pixel_boxes)} areas kept", [f["id"] for f in found],
+                       picture=picture)
+        return self._feedback({"found": found, "notes": notes}, "patch", picture)
 
     def _tool_survey(self, crop_seen: str, weeds_visible) -> ToolResult:
         if crop_seen not in CROPS_SEEN:
@@ -320,8 +327,10 @@ class ToolRunner:
             self.state.box_cap_hit = True  # more weeds may be out there: the count becomes a floor
         if kind == "crop":
             self.state.refresh_patches()
-        self.state.log("mark", f"Mark {kind}: {len(found)} of {len(boxes)} boxes kept", [f["id"] for f in found])
-        return self._feedback({"found": found, "notes": notes}, kind)
+        picture = self._render_overlay()
+        self.state.log("mark", f"Mark {kind}: {len(found)} of {len(boxes)} boxes kept", [f["id"] for f in found],
+                       picture=picture)
+        return self._feedback({"found": found, "notes": notes}, kind, picture)
 
     def _tool_zoom(self, instance_id: str | None = None, box: list[int] | None = None) -> ToolResult:
         if instance_id:
@@ -338,7 +347,7 @@ class ToolRunner:
         scale = self.state.image.full.width / self.state.image.work.width
         crop = self.state.image.full.crop(tuple(int(v * scale) for v in (left, top, right, bottom)))
         crop.thumbnail((ZOOM_MAX_PX, ZOOM_MAX_PX))
-        self.state.log("zoom", f"Zoom on {label}", [instance_id] if instance_id else [])
+        self.state.log("zoom", f"Zoom on {label}", [instance_id] if instance_id else [], picture=crop)
         return ToolResult(f"The close-up of {label} follows in the next message.",
                           images=[(f"Close-up of {label}", to_data_url(crop))])
 
