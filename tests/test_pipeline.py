@@ -1,6 +1,8 @@
+import hashlib
 import logging
 
 from scout.agent.state import StopState
+from scout.app import pipeline as pipeline_module
 from scout.app.pipeline import Pipeline, Walk, walk_id_for
 from scout.config import Settings
 from scout.models import StopResult
@@ -77,6 +79,16 @@ def test_walk_id_is_stable_and_hex():
     assert walk_id_for("corn", images) == walk_id_for("corn", images)
     assert walk_id_for("corn", images) != walk_id_for("soybean", images)
     assert len(walk_id_for("corn", images)) == 16
+
+
+def test_walk_id_changes_with_the_agent_version(monkeypatch):
+    images = [make_image()]
+    old_key = "soybean|" + ",".join(image.hash for image in images)
+    unversioned = hashlib.sha256(old_key.encode()).hexdigest()[:16]
+    current = walk_id_for("soybean", images)
+    assert current != unversioned  # cached reports from before the version was part of the key are not served
+    monkeypatch.setattr(pipeline_module, "WALK_VERSION", "next")
+    assert walk_id_for("soybean", images) != current
 
 
 def test_find_dir_rejects_bad_ids(tmp_path):

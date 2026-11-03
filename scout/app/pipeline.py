@@ -20,6 +20,7 @@ from scout.vision.sam_client import SamClient
 
 DEMO_DIR = Path(__file__).resolve().parents[2] / "demo"
 _WALK_ID = re.compile(r"[0-9a-f]{16}")
+WALK_VERSION = "2"  # bump when the agent or rules change, so old cached reports aren't served for new runs
 log = logging.getLogger(__name__)
 
 
@@ -37,7 +38,7 @@ class Walk:
 
 
 def walk_id_for(crop: str, images: list[StopImage]) -> str:
-    key = crop + "|" + ",".join(image.hash for image in images)
+    key = f"{WALK_VERSION}|{crop}|" + ",".join(image.hash for image in images)
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
