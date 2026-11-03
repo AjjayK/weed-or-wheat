@@ -220,3 +220,22 @@ def test_maybe_unmarked_can_take_the_measured_plant_count():
     state.all_weeds_marked, state.weeds_estimate = True, 10
     state.add_mask(rect(60, 60, 65, 80), "prompt", "waterhemp", role="weed")
     assert state.maybe_unmarked() and not state.maybe_unmarked(plants=9)
+
+
+def test_log_saves_a_picture_through_the_sink_and_names_it_on_the_step():
+    saved = []
+    state = StopState(make_image(), "soybean",
+                      picture_sink=lambda image: saved.append(image.size) or f"s0-{len(saved):02d}.jpg")
+    step = state.log("mark", "Mark weed: 1 of 1 boxes kept", picture=state.image.work, detail=["a"])
+    assert step.picture == "s0-01.jpg" and step.detail == ["a"] and saved == [(100, 100)]
+    assert state.log("zoom", "Zoom on s0-i1", picture=state.image.work).picture == "s0-02.jpg"
+    assert state.log("classify", "Classified 1 plants (1 weeds)").picture is None
+    assert StopState(make_image(), "soybean").log("mark", "x", picture=make_image().work).picture is None
+
+
+def test_a_picture_that_fails_to_save_does_not_end_the_stop():
+    def broken(image):
+        raise OSError("disk full")
+
+    step = StopState(make_image(), "soybean", picture_sink=broken).log("mark", "x", picture=make_image().work)
+    assert step.picture is None and step.summary == "x"

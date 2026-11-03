@@ -35,6 +35,8 @@ class AgentStep(BaseModel):
     summary: str
     instance_ids: list[str] = Field(default_factory=list)
     ok: bool = True
+    detail: list[str] = Field(default_factory=list)  # a "think" step's reasoning lines
+    picture: str | None = None  # file name of the picture saved for this step, if any
 
 
 class StopResult(BaseModel):

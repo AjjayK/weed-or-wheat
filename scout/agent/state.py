@@ -3,6 +3,7 @@
 The agent sees and gives boxes as [x1, y1, x2, y2] from 0 to 1000 on both axes (x from the left edge, y from the
 top). Code works in work-image pixels; to_pixels and to_thousandths convert between the two.
 """
+import logging
 import time
 from typing import Callable, Sequence
 
@@ -15,6 +16,8 @@ from scout.vision import masks as mk
 from scout.vision.overlay import render_overlay
 from scout.vision.patches import green_mask, patch_mask
 from scout.vision.rows import band_mask, canopy_band, fit_rows
+
+_log = logging.getLogger(__name__)
 
 SCALE = 1000
 MIN_BOX_PX = 2
@@ -60,7 +63,8 @@ def to_thousandths(box: Box, size: tuple[int, int]) -> list[int]:
 
 class StopState:
     def __init__(self, image: StopImage, crop: str, on_step: Callable[[AgentStep], None] | None = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 picture_sink: Callable[[Image.Image], str] | None = None):
         self.image = image
         self.crop = crop
         self.instances: dict[str, Instance] = {}
@@ -84,6 +88,7 @@ class StopState:
         self._next = 0
         self._on_step = on_step
         self._clock = clock
+        self._picture_sink = picture_sink
         self.started = clock()
 
     @property
@@ -93,9 +98,16 @@ class StopState:
     def elapsed_s(self) -> float:
         return self._clock() - self.started
 
-    def log(self, tool: str, summary: str, instance_ids=(), ok: bool = True) -> AgentStep:
+    def log(self, tool: str, summary: str, instance_ids=(), ok: bool = True, detail: Sequence[str] = (),
+            picture: Image.Image | None = None) -> AgentStep:
+        name = None
+        if picture is not None and self._picture_sink is not None:
+            try:
+                name = self._picture_sink(picture)
+            except Exception:  # pictures are for people watching; a failed save must not end the stop
+                _log.warning("step picture could not be saved", exc_info=True)
         step = AgentStep(t_ms=int((self._clock() - self.started) * 1000), tool=tool, summary=summary,
-                         instance_ids=list(instance_ids), ok=ok)
+                         instance_ids=list(instance_ids), ok=ok, detail=list(detail), picture=name)
         self.steps.append(step)
         if self._on_step:
             self._on_step(step)
