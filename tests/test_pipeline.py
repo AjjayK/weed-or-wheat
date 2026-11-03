@@ -279,3 +279,40 @@ def test_events_are_listed_in_the_order_of_their_times(monkeypatch):
     first.join(5)
     second.join(5)
     assert [(e["type"], e["t"]) for e in walk.events] == [("first", 1.0), ("second", 9.0)]
+
+
+def _ship(pipeline, tmp_path, images, crop="soybean"):
+    """Run a walk and move its folder from the store to the demo folder, as a shipped sample."""
+    walk = Walk(id=walk_id_for(crop, images), crop=crop)
+    pipeline.run(walk, images)
+    (tmp_path / "demo").mkdir(exist_ok=True)
+    (tmp_path / "store" / walk.id).rename(tmp_path / "demo" / walk.id)
+    return walk
+
+
+def test_the_sample_thumbnail_is_the_first_stops_photo(tmp_path):
+    pipeline = _pipeline(tmp_path, fake_runner)
+    walk = _ship(pipeline, tmp_path, [make_image(index=0), make_image(index=1, color=(10, 10, 10))])
+    saved = tmp_path / "demo" / walk.id / "events.json"
+    events = json.loads(saved.read_text(encoding="utf-8"))
+    saved.write_text(json.dumps(list(reversed(events))), encoding="utf-8")  # stop 1 now starts first in the list
+    (tmp_path / "demo" / "samples.json").write_text(json.dumps([{"walk_id": walk.id, "name": "Two stops"}]))
+    [sample] = pipeline.samples()
+    assert sample["stops"] == 2 and sample["thumbnail"] == f"/walks/{walk.id}/steps/s0-00.jpg"
+
+
+def test_a_sample_that_cannot_be_read_comes_back_bare_and_one_without_an_id_is_skipped(tmp_path, caplog):
+    pipeline = _pipeline(tmp_path, fake_runner)
+    good = _ship(pipeline, tmp_path, [make_image(index=0)])
+    broken = _ship(pipeline, tmp_path, [make_image(index=0, color=(10, 10, 10))])
+    (tmp_path / "demo" / broken.id / "report.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "demo" / "samples.json").write_text(json.dumps([
+        {"walk_id": good.id, "name": "Good"},
+        {"name": "No id"},
+        {"walk_id": broken.id, "name": "Broken"}]))
+    with caplog.at_level(logging.WARNING, logger="scout.app.pipeline"):
+        samples = pipeline.samples()
+    assert [s["name"] for s in samples] == ["Good", "Broken"]
+    assert samples[0]["stops"] == 1 and samples[0]["decision"] == "No action" and samples[0]["thumbnail"]
+    assert samples[1] == {"walk_id": broken.id, "name": "Broken", "thumbnail": None, "decision": None, "stops": None}
+    assert broken.id in caplog.text

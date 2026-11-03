@@ -121,15 +121,24 @@ class Pipeline:
             return []
         out = []
         for sample in json.loads(index.read_text(encoding="utf-8")):
-            report = self.cached(sample["walk_id"])
-            events = self.saved_events(sample["walk_id"]) or []
-            thumbnail = next((e.get("picture") for e in events if e.get("type") == "stop_start"), None)
-            decision = None
-            if report is not None:
-                decision = decision_text(report)
-            out.append({**sample, "thumbnail": thumbnail, "decision": decision,
-                        "stops": len(report.stops) if report else None})
+            walk_id = sample.get("walk_id") if isinstance(sample, dict) else None
+            if not walk_id:
+                log.warning("skipping a sample with no walk_id: %r", sample)
+                continue
+            try:
+                out.append({**sample, **self._sample_details(walk_id)})
+            except Exception:  # one bad sample must not take the list down
+                log.warning("sample %s could not be read", walk_id, exc_info=True)
+                out.append({**sample, "thumbnail": None, "decision": None, "stops": None})
         return out
+
+    def _sample_details(self, walk_id: str) -> dict:
+        report = self.cached(walk_id)
+        starts = [e for e in self.saved_events(walk_id) or [] if e.get("type") == "stop_start"]
+        first = min(starts, key=lambda e: e["stop"], default=None)  # stop 0's photo, whatever order the events are in
+        return {"thumbnail": first.get("picture") if first else None,
+                "decision": decision_text(report) if report else None,
+                "stops": len(report.stops) if report else None}
 
     def run(self, walk: Walk, images: list[StopImage], names: list[str] | None = None) -> None:
         """Events are emitted before status changes, so a reader that sees a final status has every event."""
