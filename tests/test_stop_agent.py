@@ -329,6 +329,15 @@ def test_the_floor_flag_names_the_mark_limit():
     assert f"Weed count is a floor: a mark call used all {MAX_MARK_BOXES} boxes" in result.flags
 
 
+def test_the_result_records_the_estimate_and_the_agents_word_that_all_weeds_are_marked():
+    llm = FakeLlm([LlmTurn("r1", [SURVEY, MARK_CROP, MARK_WEEDS], ""),
+                   LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close(all_marked=True)], "")])
+    result, _ = _run(llm)
+    assert (result.weeds_estimate, result.all_weeds_marked) == (2, True)
+    result, _ = _run(FakeLlm([LlmTurn("r1", [SURVEY, MARK_CROP], ""), LlmError("response r2 was incomplete")]))
+    assert result.status == "failed" and (result.weeds_estimate, result.all_weeds_marked) == (2, None)
+
+
 def test_a_failed_stop_keeps_the_crop_it_saw():
     result, _ = _run(FakeLlm([LlmTurn("r1", [SURVEY, MARK_CROP], ""), LlmError("response r2 was incomplete")]))
     assert result.status == "failed" and result.crop_seen == "corn"

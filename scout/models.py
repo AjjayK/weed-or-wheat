@@ -57,6 +57,8 @@ class StopResult(BaseModel):
     flags: list[str] = Field(default_factory=list)
     notes: str = ""
     crop_seen: str | None = None  # the crop the agent saw: corn, soybean, alfalfa, other or unsure
+    weeds_estimate: int | None = None  # how many weed plants the agent said it saw, before marking
+    all_weeds_marked: bool | None = None  # the agent's own word at finish; None when it never finished
     steps: list[AgentStep] = Field(default_factory=list)
     status: Literal["ok", "no_crop_found", "failed"] = "ok"
 

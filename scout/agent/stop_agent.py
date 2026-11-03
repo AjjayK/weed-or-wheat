@@ -48,7 +48,8 @@ def crop_flag(crop_seen: str | None, crop: str) -> str | None:
 def _failed(state: StopState) -> StopResult:
     image = state.image
     return StopResult(stop_index=image.index, image_hash=image.hash, gps=image.gps, steps=state.steps,
-                      crop_seen=state.crop_seen, flags=[FAILED_FLAG], status="failed")
+                      crop_seen=state.crop_seen, weeds_estimate=state.weeds_estimate,
+                      all_weeds_marked=state.all_weeds_marked, flags=[FAILED_FLAG], status="failed")
 
 
 def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settings: Settings,
@@ -151,6 +152,7 @@ def finalize(state: StopState, sam) -> StopResult:
         density_per_m2=m.density_per_m2, in_row_weed_share=m.in_row_weed_share, species=m.species,
         species_cover_pct=m.species_cover_pct, species_density=m.species_density,
         species_max_height_in=m.species_max_height_in, max_height_in=m.max_height_in, flags=flags,
-        notes=state.notes, crop_seen=state.crop_seen, steps=state.steps,
+        notes=state.notes, crop_seen=state.crop_seen, weeds_estimate=state.weeds_estimate,
+        all_weeds_marked=state.all_weeds_marked, steps=state.steps,
         status="ok" if has_crop or (state.crop == "alfalfa" and worked) else "no_crop_found",
     )
