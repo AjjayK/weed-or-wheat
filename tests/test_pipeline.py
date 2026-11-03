@@ -1,6 +1,9 @@
 import hashlib
 import json
 import logging
+import threading
+from itertools import count
+from types import SimpleNamespace
 
 from PIL import Image
 
@@ -252,3 +255,27 @@ def test_step_picture_names_are_ascii_digits_only(tmp_path):
     arabic_zero = "\u0660"  # \d matches this; a step picture name never has it
     (steps / f"s{arabic_zero}-00.jpg").write_bytes(b"jpeg")
     assert pipeline.step_picture(walk_id, f"s{arabic_zero}-00.jpg") is None
+
+
+def test_events_are_listed_in_the_order_of_their_times(monkeypatch):
+    walk = Walk(id="w", crop="corn")
+    calls, reading, resume = count(), threading.Event(), threading.Event()
+
+    def clock():
+        if next(calls) == 0:  # the first emit reads the clock early, then is held up before it can append
+            reading.set()
+            assert resume.wait(5)
+            return walk.started + 1.0
+        return walk.started + 9.0
+
+    monkeypatch.setattr(pipeline_module, "time", SimpleNamespace(monotonic=clock))
+    first = threading.Thread(target=walk.emit, args=({"type": "first"},))
+    second = threading.Thread(target=walk.emit, args=({"type": "second"},))
+    first.start()
+    assert reading.wait(5)
+    second.start()
+    second.join(0.3)  # without a lock the second emit finishes here, ahead of the first
+    resume.set()
+    first.join(5)
+    second.join(5)
+    assert [(e["type"], e["t"]) for e in walk.events] == [("first", 1.0), ("second", 9.0)]

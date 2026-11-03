@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -41,9 +42,12 @@ class Walk:
     report: FieldReport | None = None
     error: str | None = None
     started: float = field(default_factory=time.monotonic)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def emit(self, event: dict) -> None:
-        self.events.append({**event, "t": round(time.monotonic() - self.started, 1)})
+        """Stops run in threads: stamping and appending together keep the list in the order of its times."""
+        with self._lock:
+            self.events.append({**event, "t": round(time.monotonic() - self.started, 1)})
 
 
 def walk_id_for(crop: str, images: list[StopImage]) -> str:
