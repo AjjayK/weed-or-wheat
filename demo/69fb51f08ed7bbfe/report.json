@@ -1,0 +1,938 @@
+{
+ "walk_id": "69fb51f08ed7bbfe",
+ "crop": "soybean",
+ "stops": [
+  {
+   "stop_index": 0,
+   "image_hash": "17dd83c18d961261",
+   "view_type": "row",
+   "gps": null,
+   "crop_stage": "V4",
+   "weed_cover_pct": 17.52,
+   "crop_cover_pct": 43.99,
+   "weed_count": 30,
+   "count_approximate": true,
+   "density_per_m2": null,
+   "in_row_weed_share": 0.75,
+   "species": {
+    "waterhemp": 30
+   },
+   "species_cover_pct": {
+    "waterhemp": 17.52
+   },
+   "species_density": null,
+   "species_max_height_in": {
+    "waterhemp": 12.0
+   },
+   "max_height_in": 12.0,
+   "flags": [
+    "Weed count is approximate: some weeds merged into patches or were counted in weed areas",
+    "Check s0-i8: low confidence",
+    "Check s0-i11: low confidence",
+    "Check s0-i13: low confidence",
+    "Check s0-i14: low confidence",
+    "Check s0-i16: low confidence",
+    "Check s0-i17: low confidence",
+    "Check s0-i31: low confidence",
+    "Check s0-i32: low confidence",
+    "Check s0-i33: low confidence",
+    "Check s0-i34: low confidence",
+    "...and 8 more plants to check"
+   ],
+   "notes": "Dense Amaranthus-type weeds in two center furrows from foreground to mid-field, plus scattered plants in adjacent furrow; crop rows intact.",
+   "crop_seen": "soybean",
+   "weeds_estimate": 41,
+   "all_weeds_marked": true,
+   "steps": [
+    {
+     "t_ms": 41937,
+     "tool": "think",
+     "summary": "Scouting the soybean rows for weeds — marking every plant and row to measure precisely.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Counting visible crop rows and estimating scattered weeds in the soybean field image.",
+      "Extending marking to include survey and weed calls with vertical crop boxes and segment option.",
+      "Adding crop and weed mark calls while estimating vertical crop row boxes from the image.",
+      "Extending weed marking with individual boxes and a foreground patch while distinguishing crop from weed foliage."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 41937,
+     "tool": "survey",
+     "summary": "Survey: looks like soybean, about 30 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 48250,
+     "tool": "mark",
+     "summary": "Mark crop: 6 of 6 boxes kept",
+     "instance_ids": [
+      "s0-i1",
+      "s0-i2",
+      "s0-i3",
+      "s0-i4",
+      "s0-i5",
+      "s0-i6"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-01.jpg"
+    },
+    {
+     "t_ms": 51062,
+     "tool": "mark",
+     "summary": "Mark weed: 15 of 15 boxes kept",
+     "instance_ids": [
+      "s0-i7",
+      "s0-i8",
+      "s0-i9",
+      "s0-i10",
+      "s0-i11",
+      "s0-i12",
+      "s0-i13",
+      "s0-i14",
+      "s0-i15",
+      "s0-i16",
+      "s0-i17",
+      "s0-i18",
+      "s0-i19",
+      "s0-i20",
+      "s0-i21"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-02.jpg"
+    },
+    {
+     "t_ms": 74656,
+     "tool": "think",
+     "summary": "My first pass mixed crop and weeds, so I'm zooming in for a closer look.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing segmentation mask overlap between crop and weed boxes to diagnose mislabeled regions.",
+      "Reassessing weed box placement after identifying furrow weeds and potential crop mislabeling.",
+      "Refining weed and crop labels by zooming furrow regions and correcting mislabeled crop boxes.",
+      "Extending labeling to dense weed clusters in two furrows and ambiguous foreground foliage."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 80328,
+     "tool": "segment",
+     "summary": "Segment \"crop row\": 7 found",
+     "instance_ids": [
+      "s0-i22",
+      "s0-i23",
+      "s0-i24",
+      "s0-i25",
+      "s0-i26",
+      "s0-i27",
+      "s0-i28"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 80328,
+     "tool": "zoom",
+     "summary": "Zoom on box [0, 700, 400, 1000]",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-03.jpg"
+    },
+    {
+     "t_ms": 80328,
+     "tool": "zoom",
+     "summary": "Zoom on box [300, 400, 600, 800]",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-04.jpg"
+    },
+    {
+     "t_ms": 130656,
+     "tool": "think",
+     "summary": "Analyzing close-up images to correct weed segmentation by separating crop from weeds and adjusting bounding boxes.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing close-up images to correct weed segmentation by separating crop from weeds and adjusting bounding boxes.",
+      "Refining weed bounding boxes to inter-row furrows and applying the patch rule for dense small weeds.",
+      "Reclassifying oversized weed boxes as crop and switching to tighter per-plant boxes near camera.",
+      "Switching broad weed boxes to patches and reclassifying mislabeled ones as ignore."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 130891,
+     "tool": "mark",
+     "summary": "Mark patch: 1 of 2 areas kept",
+     "instance_ids": [
+      "s0-i29"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-05.jpg"
+    },
+    {
+     "t_ms": 132234,
+     "tool": "mark",
+     "summary": "Mark weed: 7 of 7 boxes kept",
+     "instance_ids": [
+      "s0-i30",
+      "s0-i31",
+      "s0-i32",
+      "s0-i33",
+      "s0-i34",
+      "s0-i35",
+      "s0-i36"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-06.jpg"
+    },
+    {
+     "t_ms": 132250,
+     "tool": "zoom",
+     "summary": "Zoom on box [250, 250, 570, 500]",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-07.jpg"
+    },
+    {
+     "t_ms": 180562,
+     "tool": "think",
+     "summary": "Close-ups confirm the weeds between the rows. I'll add the remaining distant weeds and update my count.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing image bounding boxes to distinguish soybean crop rows from weed regions and resolve spatial confusion.",
+      "Reclassifying yellow boxes and magenta regions to separate weeds in furrows from crop rows.",
+      "Refining patch boundaries to exclude crop rows and tighten weed-only regions.",
+      "Validating crop mask overlap to prevent weed pixels from being excluded from measurement."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 180562,
+     "tool": "survey",
+     "summary": "Survey: looks like soybean, about 45 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 182531,
+     "tool": "mark",
+     "summary": "Mark weed: 7 of 7 boxes kept",
+     "instance_ids": [
+      "s0-i37",
+      "s0-i38",
+      "s0-i39",
+      "s0-i40",
+      "s0-i41",
+      "s0-i42",
+      "s0-i43"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-08.jpg"
+    },
+    {
+     "t_ms": 245953,
+     "tool": "think",
+     "summary": "Analyzing crop row segmentation to distinguish soybean plants from weeds in the image.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing crop row segmentation to distinguish soybean plants from weeds in the image.",
+      "Correlating magenta weed patches with blue bounding boxes and evaluating low-confidence yellow detections.",
+      "Validating weed versus crop placement and prioritizing remaining zoom calls for low-confidence boxes.",
+      "Resolving duplicate weed boxes inside the dense patch by marking interior boxes as ignore."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 245953,
+     "tool": "survey",
+     "summary": "Survey: looks like soybean, about 41 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 297796,
+     "tool": "think",
+     "summary": "Classifying weed instances including areas while reviewing crop versus ignore labels for uncertain boxes.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Classifying weed instances including areas while reviewing crop versus ignore labels for uncertain boxes.",
+      "Reclassifying mislabeled weed boxes as crop or ignore after distinguishing inter-row weed from crop foliage.",
+      "Pruning overlapping weed boxes to ignore and keeping only distinct plants for the count.",
+      "Filtering low-confidence and duplicate weed boxes while excluding crop or soil regions."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 297828,
+     "tool": "classify",
+     "summary": "Classified 30 plants (30 weeds)",
+     "instance_ids": [
+      "s0-i7",
+      "s0-i8",
+      "s0-i9",
+      "s0-i10",
+      "s0-i11",
+      "s0-i12",
+      "s0-i13",
+      "s0-i14",
+      "s0-i15",
+      "s0-i16",
+      "s0-i17",
+      "s0-i18",
+      "s0-i19",
+      "s0-i20",
+      "s0-i21",
+      "s0-i29",
+      "s0-i30",
+      "s0-i31",
+      "s0-i32",
+      "s0-i33",
+      "s0-i34",
+      "s0-i35",
+      "s0-i36",
+      "s0-i37",
+      "s0-i38",
+      "s0-i39",
+      "s0-i40",
+      "s0-i41",
+      "s0-i42",
+      "s0-i43"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 300953,
+     "tool": "measure",
+     "summary": "Measure: weed cover 17.52%, 30 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 300953,
+     "tool": "finish",
+     "summary": "Stop closed",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    }
+   ],
+   "status": "ok"
+  },
+  {
+   "stop_index": 1,
+   "image_hash": "db160754fc509163",
+   "view_type": "row",
+   "gps": null,
+   "crop_stage": "V4",
+   "weed_cover_pct": 7.51,
+   "crop_cover_pct": 65.14,
+   "weed_count": 9,
+   "count_approximate": false,
+   "density_per_m2": null,
+   "in_row_weed_share": 0.519,
+   "species": {
+    "waterhemp": 9
+   },
+   "species_cover_pct": {
+    "waterhemp": 7.51
+   },
+   "species_density": null,
+   "species_max_height_in": {},
+   "max_height_in": null,
+   "flags": [
+    "Check s1-i15: low confidence",
+    "Check s1-i25: low confidence"
+   ],
+   "notes": "Waterhemp escapes concentrated in center inter-row with larger plants in foreground; side-row magenta was soybean and was classified as crop.",
+   "crop_seen": "soybean",
+   "weeds_estimate": 11,
+   "all_weeds_marked": true,
+   "steps": [
+    {
+     "t_ms": 59453,
+     "tool": "think",
+     "summary": "First pass — I'll map crop rows and flag every weed I can see for measurement.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing the soybean field image to identify and estimate weed locations and types.",
+      "Identifying weed instances and soybean rows while planning survey, mark, and segment calls.",
+      "Planning crop and weed calls by estimating row centerlines and bounding boxes.",
+      "Refining bounding boxes to follow individual rows while minimizing soil inclusion."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 59453,
+     "tool": "survey",
+     "summary": "Survey: looks like soybean, about 18 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 66344,
+     "tool": "segment",
+     "summary": "Segment \"crop row\": 5 found",
+     "instance_ids": [
+      "s1-i1",
+      "s1-i2",
+      "s1-i3",
+      "s1-i4",
+      "s1-i5"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 71359,
+     "tool": "mark",
+     "summary": "Mark crop: 7 of 7 boxes kept",
+     "instance_ids": [
+      "s1-i6",
+      "s1-i7",
+      "s1-i8",
+      "s1-i9",
+      "s1-i10",
+      "s1-i11",
+      "s1-i12"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-01.jpg"
+    },
+    {
+     "t_ms": 73531,
+     "tool": "mark",
+     "summary": "Mark weed: 9 of 9 boxes kept",
+     "instance_ids": [
+      "s1-i13",
+      "s1-i14",
+      "s1-i15",
+      "s1-i16",
+      "s1-i17",
+      "s1-i18",
+      "s1-i19",
+      "s1-i20",
+      "s1-i21"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-02.jpg"
+    },
+    {
+     "t_ms": 103469,
+     "tool": "think",
+     "summary": "Those foreground flags need a closer look — pulling detailed views to confirm.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing the segmentation overlay to distinguish crop from weed and correcting mislabeled bottom boxes.",
+      "Zooming on four yellow boxes to verify weed versus crop and locating remaining unmarked weeds.",
+      "Extending filtering to additional small weeds and preparing zooms on ambiguous instances.",
+      "Initiating zooms on four yellow boxes to verify weed versus crop overlap."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 103469,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i20",
+     "instance_ids": [
+      "s1-i20"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-03.jpg"
+    },
+    {
+     "t_ms": 103469,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i21",
+     "instance_ids": [
+      "s1-i21"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-04.jpg"
+    },
+    {
+     "t_ms": 103469,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i19",
+     "instance_ids": [
+      "s1-i19"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-05.jpg"
+    },
+    {
+     "t_ms": 103484,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i15",
+     "instance_ids": [
+      "s1-i15"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-06.jpg"
+    },
+    {
+     "t_ms": 138266,
+     "tool": "think",
+     "summary": "Analyzing close-up images to classify magenta boxes as crop or weed based on leaf morphology.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing close-up images to classify magenta boxes as crop or weed based on leaf morphology.",
+      "Reclassifying bottom boxes from weed to crop and adjusting the count estimate downward.",
+      "Adjusting the weed count downward after reclassifying a crop box and planning to add missed small weeds.",
+      "Adding weed boxes for inter-row gaps and right-row edge intrusions while excluding crop foliage."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 139750,
+     "tool": "mark",
+     "summary": "Mark weed: 5 of 5 boxes kept",
+     "instance_ids": [
+      "s1-i22",
+      "s1-i23",
+      "s1-i24",
+      "s1-i25",
+      "s1-i26"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-07.jpg"
+    },
+    {
+     "t_ms": 169375,
+     "tool": "think",
+     "summary": "Most middle-row weeds look right, but the edge marks are questionable — zooming in to verify them.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing image segmentation errors where weed masks incorrectly cover crop rows due to SAM misclassifying crop leaves as weed.",
+      "Refining the mask by excluding crop boxes and tightening around weed-only regions.",
+      "Reclassifying foreground boxes as crop and refocusing on distinct inter-row weed plants.",
+      "Zooming on flagged boxes to separate crop from distinct weed stems and tighten the annotations."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 169375,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i24",
+     "instance_ids": [
+      "s1-i24"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-08.jpg"
+    },
+    {
+     "t_ms": 169375,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i26",
+     "instance_ids": [
+      "s1-i26"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-09.jpg"
+    },
+    {
+     "t_ms": 169375,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i25",
+     "instance_ids": [
+      "s1-i25"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-10.jpg"
+    },
+    {
+     "t_ms": 169375,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i22",
+     "instance_ids": [
+      "s1-i22"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-11.jpg"
+    },
+    {
+     "t_ms": 169375,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i23",
+     "instance_ids": [
+      "s1-i23"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-12.jpg"
+    },
+    {
+     "t_ms": 224906,
+     "tool": "think",
+     "summary": "Those side-row flags were actually crop, so I'll correct the count and tighten the true foreground weeds.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing close-up images to classify bounding boxes as crop or weed based on leaf shape and position.",
+      "Reclassifying two crop-row boxes as non-weed and validating a small seedling box as true weed.",
+      "Reclassifying an oversized weed box that covers crop foliage as crop and reevaluating a tight weed box as valid.",
+      "Finalizing weed versus crop labels and dropping soil boxes to match the no-crop rule."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 224906,
+     "tool": "survey",
+     "summary": "Survey: looks like soybean, about 11 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 226437,
+     "tool": "mark",
+     "summary": "Mark weed: 2 of 2 boxes kept",
+     "instance_ids": [
+      "s1-i27",
+      "s1-i28"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-13.jpg"
+    },
+    {
+     "t_ms": 258703,
+     "tool": "think",
+     "summary": "Cleanup is next — I'll inspect the remaining duplicate marks before correcting the set.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing misclassified crop regions as weeds due to oversized bounding boxes and correcting weed count estimates.",
+      "Refining weed detection by reclassifying crop boxes and validating true weed regions in the middle furrow.",
+      "Reclassifying mislabeled crop boxes and tightening weed box boundaries to reduce SAM segmentation bleed.",
+      "Dropping overlapping and crop-covering boxes by reclassifying them to crop or ignore before adding tighter weed boxes."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 258703,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i27",
+     "instance_ids": [
+      "s1-i27"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-14.jpg"
+    },
+    {
+     "t_ms": 258703,
+     "tool": "zoom",
+     "summary": "Zoom on s1-i28",
+     "instance_ids": [
+      "s1-i28"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-15.jpg"
+    },
+    {
+     "t_ms": 293546,
+     "tool": "think",
+     "summary": "Analyzing plant images to distinguish soybean from waterhemp and map bounding boxes to crop versus weed labels.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing plant images to distinguish soybean from waterhemp and map bounding boxes to crop versus weed labels.",
+      "Classifying additional bounding boxes as crop or weed while filtering out soil and residue.",
+      "Resolving ambiguous edge boxes and duplicate overlaps to finalize weed versus crop labels.",
+      "Applying an abstract transformation under the interface constraint."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 293562,
+     "tool": "classify",
+     "summary": "Classified 16 plants (10 weeds)",
+     "instance_ids": [
+      "s1-i13",
+      "s1-i14",
+      "s1-i15",
+      "s1-i16",
+      "s1-i17",
+      "s1-i18",
+      "s1-i19",
+      "s1-i20",
+      "s1-i21",
+      "s1-i22",
+      "s1-i23",
+      "s1-i24",
+      "s1-i25",
+      "s1-i26",
+      "s1-i27",
+      "s1-i28"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 295734,
+     "tool": "measure",
+     "summary": "Measure: weed cover 7.51%, 9 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 295734,
+     "tool": "finish",
+     "summary": "Stop closed",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    }
+   ],
+   "status": "ok"
+  }
+ ],
+ "species_summary": [
+  {
+   "species_id": "waterhemp",
+   "stops_present": 2,
+   "frequency": 1.0,
+   "mean_cover_pct": 12.52,
+   "mean_density_per_m2": null,
+   "max_height_in": 12.0,
+   "outcome": "treat"
+  }
+ ],
+ "decision": "treat",
+ "treat_mode": "broadcast",
+ "urgency": "Treat within ~3 days (12 in, label limit 12 in)",
+ "rule_trace": [
+  "waterhemp: zero tolerance; present at 2 of 2 stops -> treat",
+  "Treat mode: broadcast (treated species at 100% of stops, mean weed cover 12.5%)"
+ ],
+ "explanation": "Found waterhemp in soybean at 2 of 2 stops with mean cover 12.52 percent and max height 12.0 in. Because waterhemp has zero tolerance and was present at 100 percent of stops, the decision is to treat with a broadcast application. Urgency is Treat within ~3 days (12 in, label limit 12 in). Among options weigh herbicide groups and trait requirements. Roundup PowerMAX 3 is group 9 and requires glyphosate-tolerant trait and allows up to 12.0 in. FLEXSTAR is group 14 with no trait required. Engenia Herbicide is group 4 and requires dicamba-tolerant trait. Enlist One, LIBERTY 280 SL HERBICIDE and COBRA HERBICIDE are over size limit. Read the label before use.",
+ "options": [
+  {
+   "record": {
+    "reg_no": "524-659",
+    "product_name": "Roundup PowerMAX 3",
+    "active_ingredients": [
+     "Glyphosate"
+    ],
+    "herbicide_groups": [
+     "9"
+    ],
+    "crop": "soybean",
+    "species_id": "waterhemp",
+    "weed_label_text": "Waterhemp*",
+    "timing": "postemergence",
+    "max_weed_height_in": 12.0,
+    "crop_stage_min": null,
+    "crop_stage_max": "R2",
+    "rate_min": 20.0,
+    "rate_max": 40.0,
+    "rate_unit": "fluid ounces per acre",
+    "phi_days": 14,
+    "rei_hours": 4,
+    "page": 98,
+    "quote": "Waterhemp* - - 6 - 12",
+    "pdf_file": "000524-00659-20241213.pdf",
+    "requires_trait": "glyphosate-tolerant"
+   },
+   "over_size_limit": false
+  },
+  {
+   "record": {
+    "reg_no": "100-1101",
+    "product_name": "FLEXSTAR",
+    "active_ingredients": [
+     "Sodium salt of fomesafen"
+    ],
+    "herbicide_groups": [
+     "14"
+    ],
+    "crop": "soybean",
+    "species_id": "waterhemp",
+    "weed_label_text": "Waterhemp, Common",
+    "timing": "postemergence",
+    "max_weed_height_in": null,
+    "crop_stage_min": null,
+    "crop_stage_max": null,
+    "rate_min": 1.0,
+    "rate_max": 1.5,
+    "rate_unit": "pt/A",
+    "phi_days": 45,
+    "rei_hours": 24,
+    "page": 29,
+    "quote": "Waterhemp, Common",
+    "pdf_file": "000100-01101-20181217.pdf",
+    "requires_trait": null
+   },
+   "over_size_limit": false
+  },
+  {
+   "record": {
+    "reg_no": "7969-507",
+    "product_name": "Engenia Herbicide",
+    "active_ingredients": [
+     "N,N-Bis-(3-aminopropyl) methylamine salt of 3,6-dichloro-o-anisic acid"
+    ],
+    "herbicide_groups": [
+     "4"
+    ],
+    "crop": "soybean",
+    "species_id": "waterhemp",
+    "weed_label_text": "Waterhemp (common, tall)",
+    "timing": "postemergence",
+    "max_weed_height_in": null,
+    "crop_stage_min": null,
+    "crop_stage_max": "R1",
+    "rate_min": 12.8,
+    "rate_max": 12.8,
+    "rate_unit": "fl ozs/A",
+    "phi_days": 7,
+    "rei_hours": 24,
+    "page": 40,
+    "quote": "Waterhemp (common, tall) Amaranthus tuberculatus",
+    "pdf_file": "007969-00507-20260206.pdf",
+    "requires_trait": "dicamba-tolerant"
+   },
+   "over_size_limit": false
+  },
+  {
+   "record": {
+    "reg_no": "62719-695",
+    "product_name": "Enlist One",
+    "active_ingredients": [
+     "2,4-D, choline salt"
+    ],
+    "herbicide_groups": [
+     "4"
+    ],
+    "crop": "soybean",
+    "species_id": "waterhemp",
+    "weed_label_text": "waterhemp",
+    "timing": "postemergence",
+    "max_weed_height_in": 6.0,
+    "crop_stage_min": null,
+    "crop_stage_max": "R1",
+    "rate_min": 2.0,
+    "rate_max": 2.0,
+    "rate_unit": "pints",
+    "phi_days": 50,
+    "rei_hours": 48,
+    "page": 19,
+    "quote": "Apply 2.0 pints of GF-3335 per acre. Apply when weeds are no larger than 6 inches",
+    "pdf_file": "062719-00695-20240125.pdf",
+    "requires_trait": "Enlist"
+   },
+   "over_size_limit": true
+  },
+  {
+   "record": {
+    "reg_no": "7969-448",
+    "product_name": "LIBERTY 280 SL HERBICIDE",
+    "active_ingredients": [
+     "Glufosinate"
+    ],
+    "herbicide_groups": [
+     "10"
+    ],
+    "crop": "soybean",
+    "species_id": "waterhemp",
+    "weed_label_text": "Waterhemp, common",
+    "timing": "postemergence",
+    "max_weed_height_in": 3.0,
+    "crop_stage_min": "Emergence",
+    "crop_stage_max": "R1",
+    "rate_min": 29.0,
+    "rate_max": 43.0,
+    "rate_unit": "fl ozs/A",
+    "phi_days": 70,
+    "rei_hours": 12,
+    "page": 21,
+    "quote": "Apply 29 to 43 fl ozs/A",
+    "pdf_file": "007969-00448-20260826.pdf",
+    "requires_trait": "glufosinate-tolerant"
+   },
+   "over_size_limit": true
+  },
+  {
+   "record": {
+    "reg_no": "59639-34",
+    "product_name": "COBRA HERBICIDE",
+    "active_ingredients": [
+     "Lactofen"
+    ],
+    "herbicide_groups": [
+     "14"
+    ],
+    "crop": "soybean",
+    "species_id": "waterhemp",
+    "weed_label_text": "Waterhemp, Common",
+    "timing": "postemergence",
+    "max_weed_height_in": 3.0,
+    "crop_stage_min": null,
+    "crop_stage_max": "R6",
+    "rate_min": 10.0,
+    "rate_max": 12.5,
+    "rate_unit": "fl oz/A",
+    "phi_days": 45,
+    "rei_hours": 12,
+    "page": 18,
+    "quote": "Common Amaranthus rudis 6 3",
+    "pdf_file": "059639-00034-20260113.pdf",
+    "requires_trait": null
+   },
+   "over_size_limit": true
+  }
+ ],
+ "crop_mismatch": null
+}

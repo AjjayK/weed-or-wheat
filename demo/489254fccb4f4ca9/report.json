@@ -1,0 +1,908 @@
+{
+ "walk_id": "489254fccb4f4ca9",
+ "crop": "corn",
+ "stops": [
+  {
+   "stop_index": 0,
+   "image_hash": "46b09871afb62213",
+   "view_type": "row",
+   "gps": null,
+   "crop_stage": "V7",
+   "weed_cover_pct": 11.17,
+   "crop_cover_pct": 36.0,
+   "weed_count": 20,
+   "count_approximate": true,
+   "density_per_m2": null,
+   "in_row_weed_share": 0.002,
+   "species": {
+    "field_horsetail": 20
+   },
+   "species_cover_pct": {
+    "field_horsetail": 11.17
+   },
+   "species_density": null,
+   "species_max_height_in": {},
+   "max_height_in": null,
+   "flags": [
+    "Weed count is approximate: some weeds merged into patches or were counted in weed areas"
+   ],
+   "notes": "Dense field horsetail in inter-row center with scattered plants at bottom and right edge; corn leaves crossing patch excluded as crop.",
+   "crop_seen": "corn",
+   "weeds_estimate": 25,
+   "all_weeds_marked": true,
+   "steps": [
+    {
+     "t_ms": 27421,
+     "tool": "think",
+     "summary": "I see a corn stand with a dense strip of small weeds between the rows. I'll survey the field and map the crop rows and weed patches.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing the image to identify corn rows and dense weed patches for annotation.",
+      "Choosing crop row and patch boxes while limiting scope to foreground areas.",
+      "Adding patch boxes for dense near-camera weeds while excluding far-field areas and individual weed marks.",
+      "Resolving the conflict between thorough weed coverage and the near-camera patch constraint by adding a few mid-field individual weed boxes outside the patch."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 27421,
+     "tool": "survey",
+     "summary": "Survey: looks like corn, about 60 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 41796,
+     "tool": "mark",
+     "summary": "Mark crop: 2 of 2 boxes kept",
+     "instance_ids": [
+      "s0-i1",
+      "s0-i2"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-01.jpg"
+    },
+    {
+     "t_ms": 42093,
+     "tool": "mark",
+     "summary": "Mark patch: 1 of 1 areas kept",
+     "instance_ids": [
+      "s0-i3"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-02.jpg"
+    },
+    {
+     "t_ms": 43483,
+     "tool": "mark",
+     "summary": "Mark weed: 6 of 6 boxes kept",
+     "instance_ids": [
+      "s0-i4",
+      "s0-i5",
+      "s0-i6",
+      "s0-i7",
+      "s0-i8",
+      "s0-i9"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-03.jpg"
+    },
+    {
+     "t_ms": 61733,
+     "tool": "think",
+     "summary": "The overlay shows crop leaves painted as weeds inside the patch. I'll correct the crop coverage to fix the contamination.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Evaluating image segmentation by marking crop leaves in magenta weed area as crop to exclude them.",
+      "Extending crop masks to cover the central leaf crossing and validating bottom weed boxes."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 66639,
+     "tool": "mark",
+     "summary": "Mark crop: 2 of 2 boxes kept",
+     "instance_ids": [
+      "s0-i10",
+      "s0-i11"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-04.jpg"
+    },
+    {
+     "t_ms": 111921,
+     "tool": "think",
+     "summary": "Evaluating weed versus crop segmentation in blue box area and correcting magenta mislabeling on corn leaves.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Evaluating weed versus crop segmentation in blue box area and correcting magenta mislabeling on corn leaves.",
+      "Refining patch boundaries to exclude crop leaves and tightening crop leaf box coordinates.",
+      "Evaluating why crop leaf masks aren't excluding the patch area and considering splitting the patch instead.",
+      "Refining crop leaf crop boxes to the patch interior and identifying additional unmarked bottom weeds."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 113906,
+     "tool": "mark",
+     "summary": "Mark crop: 2 of 2 boxes kept",
+     "instance_ids": [
+      "s0-i12",
+      "s0-i13"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-05.jpg"
+    },
+    {
+     "t_ms": 115031,
+     "tool": "mark",
+     "summary": "Mark weed: 5 of 5 boxes kept",
+     "instance_ids": [
+      "s0-i14",
+      "s0-i15",
+      "s0-i16",
+      "s0-i17",
+      "s0-i18"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-06.jpg"
+    },
+    {
+     "t_ms": 153077,
+     "tool": "think",
+     "summary": "Several edge boxes need a closer look, so I'll zoom in to verify them and ensure no weeds are missed.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing weed vs crop segmentation errors where crop leaves are misclassified as weed despite crop exclusion boxes.",
+      "Refining the crop exclusion mask to prevent leaf pixels from being labeled as weed.",
+      "Filtering weed boxes that overlap the crop patch and scheduling zooms for ambiguous edge regions.",
+      "Reclassifying a mislabeled crop leaf as crop and adjusting the weed count estimate for unmarked far-field areas."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 153077,
+     "tool": "zoom",
+     "summary": "Zoom on s0-i15",
+     "instance_ids": [
+      "s0-i15"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-07.jpg"
+    },
+    {
+     "t_ms": 153077,
+     "tool": "zoom",
+     "summary": "Zoom on s0-i16",
+     "instance_ids": [
+      "s0-i16"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-08.jpg"
+    },
+    {
+     "t_ms": 153077,
+     "tool": "zoom",
+     "summary": "Zoom on s0-i4",
+     "instance_ids": [
+      "s0-i4"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-09.jpg"
+    },
+    {
+     "t_ms": 153077,
+     "tool": "zoom",
+     "summary": "Zoom on s0-i9",
+     "instance_ids": [
+      "s0-i9"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s0-10.jpg"
+    },
+    {
+     "t_ms": 206281,
+     "tool": "think",
+     "summary": "Analyzing close-up image s0-i15 to assess weed versus crop labeling accuracy and SAM mask overlap.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing close-up image s0-i15 to assess weed versus crop labeling accuracy and SAM mask overlap.",
+      "Reconciling crop and weed mask overlap by reevaluating box labels and segmentation boundaries.",
+      "Filtering weed boxes inside the patch to ignore and keeping crop leaf boxes for exclusion.",
+      "Reclassifying two mixed-content boxes from weed to crop and noting far-field weeds remain unmarked."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 206281,
+     "tool": "survey",
+     "summary": "Survey: looks like corn, about 25 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 249374,
+     "tool": "think",
+     "summary": "Analyzing zoomed image regions to classify overlapping crop and weed areas with low confidence.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing zoomed image regions to classify overlapping crop and weed areas with low confidence.",
+      "Verifying that crop segmentation masks exclude weed measurements despite persistent overlay coloring.",
+      "Reclassifying two edge boxes from weed to crop and confirming remaining weed-only boxes.",
+      "Extending weed classification to background horsetail instances while excluding far-field and crop-contaminated boxes."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 249406,
+     "tool": "classify",
+     "summary": "Classified 12 plants (7 weeds)",
+     "instance_ids": [
+      "s0-i3",
+      "s0-i4",
+      "s0-i5",
+      "s0-i6",
+      "s0-i7",
+      "s0-i8",
+      "s0-i9",
+      "s0-i14",
+      "s0-i15",
+      "s0-i16",
+      "s0-i17",
+      "s0-i18"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 250483,
+     "tool": "measure",
+     "summary": "Measure: weed cover 11.17%, 20 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 250483,
+     "tool": "finish",
+     "summary": "Stop closed",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    }
+   ],
+   "status": "ok"
+  },
+  {
+   "stop_index": 1,
+   "image_hash": "028fc7d19bba99eb",
+   "view_type": "row",
+   "gps": null,
+   "crop_stage": "V8",
+   "weed_cover_pct": 21.57,
+   "crop_cover_pct": 52.31,
+   "weed_count": 41,
+   "count_approximate": true,
+   "density_per_m2": null,
+   "in_row_weed_share": 0.007,
+   "species": {
+    "unidentified_grass": 41
+   },
+   "species_cover_pct": {
+    "unidentified_grass": 21.57
+   },
+   "species_density": null,
+   "species_max_height_in": {},
+   "max_height_in": null,
+   "flags": [
+    "Weed count is approximate: some weeds merged into patches or were counted in weed areas",
+    "Check s1-i3: low confidence",
+    "Check s1-i4: low confidence",
+    "Check s1-i5: low confidence"
+   ],
+   "notes": "Dense grass weeds fill the interrow between two corn rows with some yellowing on lower leaves.",
+   "crop_seen": "corn",
+   "weeds_estimate": 45,
+   "all_weeds_marked": true,
+   "steps": [
+    {
+     "t_ms": 24889,
+     "tool": "think",
+     "summary": "First pass will map the corn rows and outline the dense grassy weed areas.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Defining annotation rules for crop rows and dense weed patches using pixel-based segmentation constraints.",
+      "Choosing per-row crop boxes and a weed-patch estimate for dense coverage.",
+      "Extending patch marking to two near-camera boxes while keeping crop boxes narrow and avoiding far-field coverage.",
+      "Switching to patch marks for dense weeds and dropping per-weed boxes to avoid overlap."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 24889,
+     "tool": "survey",
+     "summary": "Survey: looks like corn, about 120 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 39014,
+     "tool": "mark",
+     "summary": "Mark crop: 2 of 2 boxes kept",
+     "instance_ids": [
+      "s1-i1",
+      "s1-i2"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-01.jpg"
+    },
+    {
+     "t_ms": 41952,
+     "tool": "mark",
+     "summary": "Mark patch: 2 of 2 areas kept",
+     "instance_ids": [
+      "s1-i3",
+      "s1-i4"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-02.jpg"
+    },
+    {
+     "t_ms": 62593,
+     "tool": "think",
+     "summary": "The inter-row is fully covered — I'll zoom in to identify the grass species.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing weed detection patches against the rule to exclude far field and checking for mislabeled crop leaves.",
+      "Reconciling the weed count discrepancy and preparing a corrected survey estimate.",
+      "Extending filtering to neutralize markup delimiters."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 62812,
+     "tool": "zoom",
+     "summary": "Zoom on box [200, 700, 650, 950]",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-03.jpg"
+    },
+    {
+     "t_ms": 63171,
+     "tool": "zoom",
+     "summary": "Zoom on box [300, 400, 700, 650]",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-04.jpg"
+    },
+    {
+     "t_ms": 91062,
+     "tool": "think",
+     "summary": "I see unmarked weeds just beyond the current areas — I'll extend coverage to capture them.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing weed marking rules to exclude the far field and confirming the two existing patches are sufficient.",
+      "Validating that crop leaves are excluded from weed areas and adjusting the weed estimate after the survey.",
+      "Extending the weed patch coverage to capture additional near-camera areas while respecting the far-field exclusion."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 91312,
+     "tool": "mark",
+     "summary": "Mark patch: 1 of 1 areas kept",
+     "instance_ids": [
+      "s1-i5"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s1-05.jpg"
+    },
+    {
+     "t_ms": 110469,
+     "tool": "think",
+     "summary": "Coverage looks complete, so I'll update the count and finalize the identification.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Evaluating weed coverage estimates and patch area constraints against field density and distance limits.",
+      "Adjusting the weed count estimate downward after confirming full foreground coverage and patch-based measurement limits."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 110469,
+     "tool": "survey",
+     "summary": "Survey: looks like corn, about 45 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 127094,
+     "tool": "think",
+     "summary": "Coverage is complete, so now I'll classify the weed patches and take final measurements.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Classifying weed instances i3, i4, i5 while excluding crop instances and resolving ambiguous grass species from close-up images.",
+      "Resolving ambiguous grass species to unidentified_grass with low confidence and null leaf count.",
+      "Assigning dominant species to unidentified_grass with low confidence and setting crop stage to V8."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 127171,
+     "tool": "classify",
+     "summary": "Classified 3 plants (3 weeds)",
+     "instance_ids": [
+      "s1-i3",
+      "s1-i4",
+      "s1-i5"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 128171,
+     "tool": "measure",
+     "summary": "Measure: weed cover 21.57%, 41 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 128171,
+     "tool": "finish",
+     "summary": "Stop closed",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    }
+   ],
+   "status": "ok"
+  },
+  {
+   "stop_index": 2,
+   "image_hash": "9aa09fb87d6c8d44",
+   "view_type": "row",
+   "gps": null,
+   "crop_stage": "V4",
+   "weed_cover_pct": 12.31,
+   "crop_cover_pct": 42.67,
+   "weed_count": 43,
+   "count_approximate": false,
+   "density_per_m2": null,
+   "in_row_weed_share": 0.528,
+   "species": {
+    "unidentified_broadleaf": 42,
+    "common_ragweed": 1
+   },
+   "species_cover_pct": {
+    "unidentified_broadleaf": 11.15,
+    "common_ragweed": 1.16
+   },
+   "species_density": null,
+   "species_max_height_in": {
+    "unidentified_broadleaf": 4.0,
+    "common_ragweed": 4.0
+   },
+   "max_height_in": 4.0,
+   "flags": [
+    "Check s2-i6: low confidence",
+    "Check s2-i7: low confidence",
+    "Check s2-i8: low confidence",
+    "Check s2-i9: low confidence",
+    "Check s2-i10: low confidence",
+    "Check s2-i11: low confidence",
+    "Check s2-i12: low confidence",
+    "Check s2-i13: low confidence",
+    "Check s2-i14: low confidence",
+    "Check s2-i15: low confidence",
+    "...and 33 more plants to check"
+   ],
+   "notes": "Young corn with scattered small broadleaf weeds between rows; two initial boxes were crop leaf and soil and were excluded.",
+   "crop_seen": "corn",
+   "weeds_estimate": 45,
+   "all_weeds_marked": true,
+   "steps": [
+    {
+     "t_ms": 29360,
+     "tool": "think",
+     "summary": "Scouting this young corn stand — I'll map every weed to tighten your numbers.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing the corn field photo to identify and label crop rows and weed areas with bounding boxes.",
+      "Estimating vertical box coordinates for each crop row while avoiding soil overlap.",
+      "Counting individual weed plants and drafting crop row boxes while keeping soil out of the bounds.",
+      "Marking crop rows with kind crop and adding individual weed boxes while avoiding soil and crop overlap."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 29360,
+     "tool": "survey",
+     "summary": "Survey: looks like corn, about 45 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 42125,
+     "tool": "mark",
+     "summary": "Mark crop: 5 of 5 boxes kept",
+     "instance_ids": [
+      "s2-i1",
+      "s2-i2",
+      "s2-i3",
+      "s2-i4",
+      "s2-i5"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-01.jpg"
+    },
+    {
+     "t_ms": 48704,
+     "tool": "mark",
+     "summary": "Mark weed: 25 of 25 boxes kept",
+     "instance_ids": [
+      "s2-i6",
+      "s2-i7",
+      "s2-i8",
+      "s2-i9",
+      "s2-i10",
+      "s2-i11",
+      "s2-i12",
+      "s2-i13",
+      "s2-i14",
+      "s2-i15",
+      "s2-i16",
+      "s2-i17",
+      "s2-i18",
+      "s2-i19",
+      "s2-i20",
+      "s2-i21",
+      "s2-i22",
+      "s2-i23",
+      "s2-i24",
+      "s2-i25",
+      "s2-i26",
+      "s2-i27",
+      "s2-i28",
+      "s2-i29",
+      "s2-i30"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-02.jpg"
+    },
+    {
+     "t_ms": 89219,
+     "tool": "think",
+     "summary": "I've got an initial weed count — now I'll fill in the gaps I spotted.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing an agricultural image to distinguish crop, weed, and in-row zones and reconcile weed count estimates.",
+      "Identifying additional small weed patches in the inter-row areas while refining the count estimate.",
+      "Extending the weed count by adding new boxes for unmarked patches in the upper and mid zones.",
+      "Adding weed boxes for unmarked patches while narrowing crop segmentation to reduce overcoverage."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 92516,
+     "tool": "mark",
+     "summary": "Mark weed: 20 of 20 boxes kept",
+     "instance_ids": [
+      "s2-i31",
+      "s2-i32",
+      "s2-i33",
+      "s2-i34",
+      "s2-i35",
+      "s2-i36",
+      "s2-i37",
+      "s2-i38",
+      "s2-i39",
+      "s2-i40",
+      "s2-i41",
+      "s2-i42",
+      "s2-i43",
+      "s2-i44",
+      "s2-i45",
+      "s2-i46",
+      "s2-i47",
+      "s2-i48",
+      "s2-i49",
+      "s2-i50"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-03.jpg"
+    },
+    {
+     "t_ms": 134422,
+     "tool": "think",
+     "summary": "That first pass covered a lot of ground — I'll take a closer look at a few uncertain spots before finalizing.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing crop and weed segmentation masks to identify over-segmentation and false positives in yellow boxes.",
+      "Validating weed counts against the estimate and flagging mislabeled crop regions for role correction.",
+      "Extending validation to distinguish empty SAM masks as ignore versus mislabeled crop regions.",
+      "Prioritizing zoom targets among many check_this weeds and narrowing crop box overinclusion."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 134422,
+     "tool": "zoom",
+     "summary": "Zoom on s2-i37",
+     "instance_ids": [
+      "s2-i37"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-04.jpg"
+    },
+    {
+     "t_ms": 134422,
+     "tool": "zoom",
+     "summary": "Zoom on s2-i38",
+     "instance_ids": [
+      "s2-i38"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-05.jpg"
+    },
+    {
+     "t_ms": 134422,
+     "tool": "zoom",
+     "summary": "Zoom on s2-i46",
+     "instance_ids": [
+      "s2-i46"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-06.jpg"
+    },
+    {
+     "t_ms": 134438,
+     "tool": "zoom",
+     "summary": "Zoom on s2-i31",
+     "instance_ids": [
+      "s2-i31"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-07.jpg"
+    },
+    {
+     "t_ms": 134438,
+     "tool": "zoom",
+     "summary": "Zoom on s2-i36",
+     "instance_ids": [
+      "s2-i36"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-08.jpg"
+    },
+    {
+     "t_ms": 134438,
+     "tool": "zoom",
+     "summary": "Zoom on s2-i6",
+     "instance_ids": [
+      "s2-i6"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": "s2-09.jpg"
+    },
+    {
+     "t_ms": 204360,
+     "tool": "think",
+     "summary": "Analyzing six close-up images to identify crop versus weed and resolve ambiguous soil and seedling content.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Analyzing six close-up images to identify crop versus weed and resolve ambiguous soil and seedling content.",
+      "Reclassifying one box from weed to crop and confirming two weed detections while noting one ambiguous seedling.",
+      "Checking additional weed boxes for overlap with crop leaves and planning remaining tool calls.",
+      "Extending filtering to cover the unboxed magenta region on the right side."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 204360,
+     "tool": "classify",
+     "summary": "Classified 45 plants (43 weeds)",
+     "instance_ids": [
+      "s2-i6",
+      "s2-i7",
+      "s2-i8",
+      "s2-i9",
+      "s2-i10",
+      "s2-i11",
+      "s2-i12",
+      "s2-i13",
+      "s2-i14",
+      "s2-i15",
+      "s2-i16",
+      "s2-i17",
+      "s2-i18",
+      "s2-i19",
+      "s2-i20",
+      "s2-i21",
+      "s2-i22",
+      "s2-i23",
+      "s2-i24",
+      "s2-i25",
+      "s2-i26",
+      "s2-i27",
+      "s2-i28",
+      "s2-i29",
+      "s2-i30",
+      "s2-i31",
+      "s2-i32",
+      "s2-i33",
+      "s2-i34",
+      "s2-i35",
+      "s2-i36",
+      "s2-i37",
+      "s2-i38",
+      "s2-i39",
+      "s2-i40",
+      "s2-i41",
+      "s2-i42",
+      "s2-i43",
+      "s2-i44",
+      "s2-i45",
+      "s2-i46",
+      "s2-i47",
+      "s2-i48",
+      "s2-i49",
+      "s2-i50"
+     ],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 224546,
+     "tool": "think",
+     "summary": "Those close-ups helped sort weeds from crop — now I'll take final measurements.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Reconciling weed count after reclassification and checking if survey estimate needs correction before proceeding.",
+      "Finalizing view type and crop stage while confirming no far-field patches before submitting."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 226531,
+     "tool": "measure",
+     "summary": "Measure: weed cover 12.31%, 43 weeds",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    },
+    {
+     "t_ms": 234156,
+     "tool": "think",
+     "summary": "Verifying weed count matches measurement and confirming crop stage and completion flag.",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [
+      "Verifying weed count matches measurement and confirming crop stage and completion flag."
+     ],
+     "picture": null
+    },
+    {
+     "t_ms": 234156,
+     "tool": "finish",
+     "summary": "Stop closed",
+     "instance_ids": [],
+     "ok": true,
+     "detail": [],
+     "picture": null
+    }
+   ],
+   "status": "ok"
+  }
+ ],
+ "species_summary": [
+  {
+   "species_id": "common_ragweed",
+   "stops_present": 1,
+   "frequency": 0.33,
+   "mean_cover_pct": 0.39,
+   "mean_density_per_m2": null,
+   "max_height_in": 4.0,
+   "outcome": "no_action"
+  },
+  {
+   "species_id": "field_horsetail",
+   "stops_present": 1,
+   "frequency": 0.33,
+   "mean_cover_pct": 3.72,
+   "mean_density_per_m2": null,
+   "max_height_in": null,
+   "outcome": "scout_again"
+  },
+  {
+   "species_id": "unidentified_broadleaf",
+   "stops_present": 1,
+   "frequency": 0.33,
+   "mean_cover_pct": 3.72,
+   "mean_density_per_m2": null,
+   "max_height_in": 4.0,
+   "outcome": "scout_again"
+  },
+  {
+   "species_id": "unidentified_grass",
+   "stops_present": 1,
+   "frequency": 0.33,
+   "mean_cover_pct": 7.19,
+   "mean_density_per_m2": null,
+   "max_height_in": null,
+   "outcome": "treat"
+  }
+ ],
+ "decision": "treat",
+ "treat_mode": "broadcast",
+ "urgency": null,
+ "rule_trace": [
+  "common ragweed: 0.39 % cover vs threshold 5 (tool default, not from a source) -> no action",
+  "field horsetail: 3.72 % cover vs threshold 5 (tool default, not from a source) -> scout again",
+  "unidentified broadleaf: 3.72 % cover vs threshold 5 (tool default, not from a source) -> scout again",
+  "unidentified grass: 7.19 % cover vs threshold 5 (tool default, not from a source) -> treat",
+  "Treat mode: broadcast (treated species at 33% of stops, mean weed cover 15.0%)",
+  "Identify the unidentified grass to choose a product; labels name specific weeds"
+ ],
+ "explanation": "Found in corn: unidentified grass at 0.33 frequency with 7.19 % cover triggered treat, since it is above the 5 tool default threshold. Common ragweed at 0.39 % cover was below threshold so no action. Field horsetail at 3.72 % cover and unidentified broadleaf at 3.72 % cover and 4.0 in tall were below threshold so scout again. Broadcast was set because treated species was at 33% of stops with mean weed cover 15.0%. No product options were listed, so identify the unidentified grass because labels name specific weeds. Read the label before use.",
+ "options": [],
+ "crop_mismatch": null
+}
