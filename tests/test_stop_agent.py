@@ -417,3 +417,32 @@ def test_instructions_guard_against_over_marking_and_keep_calls_for_the_end():
     alfalfa = stop_instructions("alfalfa", ["dandelion"], 30)
     assert "mark the alfalfa around it as crop" in alfalfa and "hug each row's plants" not in alfalfa
     assert "an alfalfa field" in alfalfa and "a alfalfa" not in alfalfa
+
+
+def test_each_turn_logs_the_agents_thought_before_its_tools():
+    turn = LlmTurn("r1", [MARK_CROP, MARK_WEEDS], " Marking the rows and the weeds. ", [],
+                   ["Counting weeds.", "x" * 300])
+    llm = FakeLlm([turn, LlmTurn("r2", [_classify("s0-i3", "s0-i4"), *_close()], "")])
+    result, _ = _run(llm)
+    think = result.steps[0]
+    assert think.tool == "think" and think.summary == "Marking the rows and the weeds."
+    assert think.detail == ["Counting weeds.", "x" * 200] and result.steps[1].tool == "mark"
+    assert [s.tool for s in result.steps].count("think") == 1
+    assert llm.requests[0]["reasoning_summary"] is True
+
+
+def test_a_turn_with_only_reasoning_uses_its_first_line():
+    turn = LlmTurn("r1", [MARK_CROP], "", [], ["Boxing the crop rows."])
+    llm = FakeLlm([turn, LlmTurn("r2", _close("top_down"), "")])
+    result, _ = _run(llm)
+    assert (result.steps[0].tool, result.steps[0].summary) == ("think", "Boxing the crop rows.")
+
+
+def test_marks_and_zooms_save_pictures_through_the_sink():
+    saved = []
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""),
+                   LlmTurn("r2", [ToolCall("c3", "zoom", {"instance_id": "s0-i3"})], ""),
+                   LlmTurn("r3", [_classify("s0-i3", "s0-i4"), *_close()], "")])
+    result, _ = _run(llm, picture_sink=lambda image: saved.append(image.size) or f"s0-{len(saved):02d}.jpg")
+    assert [(s.tool, s.picture) for s in result.steps if s.picture] == [
+        ("mark", "s0-01.jpg"), ("mark", "s0-02.jpg"), ("zoom", "s0-03.jpg")]

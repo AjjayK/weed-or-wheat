@@ -2,6 +2,8 @@
 import time
 from typing import Callable
 
+from PIL import Image
+
 from scout.agent.llm import Llm, ToolCall, is_lost_response, user_message
 from scout.agent.prompts import stop_instructions
 from scout.agent.state import MAX_MARK_BOXES, StopState
@@ -16,6 +18,8 @@ from scout.vision.measure import compute_metrics
 FAILED_FLAG = "This stop could not be analyzed"
 UNMARKED_FLAG = "Some weeds may be unmarked: cover and count are minimums"
 MAX_CHECK_FLAGS = 10  # per-plant "Check ..." lines shown for one stop; the rest are counted in one line
+THOUGHT_LINES = 4  # reasoning lines kept per turn
+THOUGHT_MAX_CHARS = 200
 
 
 def run_order(calls: list[ToolCall]) -> list[ToolCall]:
@@ -54,10 +58,12 @@ def _failed(state: StopState) -> StopResult:
 
 def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settings: Settings,
              on_step: Callable[[AgentStep], None] | None = None,
-             clock: Callable[[], float] = time.monotonic) -> tuple[StopResult, StopState]:
-    state = StopState(image, crop, on_step=on_step, clock=clock)
+             clock: Callable[[], float] = time.monotonic,
+             picture_sink: Callable[[Image.Image], str] | None = None) -> tuple[StopResult, StopState]:
+    state = StopState(image, crop, on_step=on_step, clock=clock, picture_sink=picture_sink)
     runner = ToolRunner(state, sam, weeds, max_calls=settings.max_tool_calls, time_limit_s=settings.stop_timeout_s)
-    ask = dict(instructions=stop_instructions(crop, weeds.ids(), settings.max_tool_calls), tools=TOOL_SCHEMAS)
+    ask = dict(instructions=stop_instructions(crop, weeds.ids(), settings.max_tool_calls), tools=TOOL_SCHEMAS,
+               reasoning_summary=True)
     pending: list[dict] = [user_message(f"Stop {image.index + 1}: one photo of a {crop} field. Boxes are 0 to 1000 "
                                         "on both axes.", [image.work_data_url])]
     # Everything said so far, replayable on its own: Meta sometimes forgets a response a request chains to.
@@ -80,6 +86,10 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
                 turn = llm.turn(list(history), previous_response_id=None, **ask)  # a second failure ends the stop
             previous = None if stateless else turn.response_id
             history += turn.output_items
+            thought = (turn.text or "").strip()
+            if thought or turn.reasoning:  # what the agent is thinking, for people watching; before the turn's tools
+                state.log("think", thought or turn.reasoning[0],
+                          detail=[line[:THOUGHT_MAX_CHARS] for line in turn.reasoning[:THOUGHT_LINES]])
             if not turn.calls:
                 if nudged:
                     break
