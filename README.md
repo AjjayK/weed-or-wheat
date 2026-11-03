@@ -1,13 +1,3 @@
----
-title: Weed scout
-emoji: 🌱
-colorFrom: green
-colorTo: yellow
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # Weed scout
 
 Upload the photos from one walk through one field. A Muse Spark agent drives SAM 3.1 to separate weeds from crop at every stop, code measures weed intensity and applies threshold rules, and the report lists herbicide options whose EPA label covers this crop, this weed, and this weed size, each with a page citation.
@@ -38,6 +28,22 @@ While a walk runs, you watch the agent work photo by photo: each marking picture
 Scout photos from the command line, without the web app:
 
     PYTHONPATH=. python scripts/run_stop.py --crop corn photo1.jpg photo2.jpg
+
+## Deploy to Google Cloud Run
+In [Cloud Shell](https://shell.cloud.google.com), with a project that has billing turned on:
+
+    gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
+    PROJECT=$(gcloud config get-value project)
+    NUMBER=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
+    gcloud projects add-iam-policy-binding "$PROJECT" \
+      --member="serviceAccount:${NUMBER}-compute@developer.gserviceaccount.com" --role=roles/run.builder
+    git clone https://github.com/AjjayK/weed-or-wheat.git && cd weed-or-wheat
+    read -rsp "MODEL_API_KEY: " KEY && echo
+    gcloud run deploy weed-scout --source . --region us-central1 --port 7860 --memory 2Gi --cpu 1 \
+      --timeout 3600 --max-instances 1 --no-cpu-throttling --allow-unauthenticated \
+      --set-env-vars "MODEL_API_KEY=$KEY"
+
+`--max-instances 1` is required: a running walk lives in the server's memory, so every request must reach the same instance. `--no-cpu-throttling` keeps a walk going if the viewer closes the page. Cloud Run caps an upload at 32 MiB, so the page limits a walk's photos to 30 MB in all.
 
 ## Limits
 Decision support, not a prescription. Read the label before use; the label is the law. Density is only reported for straight-down photos. Weed counts in weed areas are approximate. Thresholds marked "tool default" are not from an agronomic source.
