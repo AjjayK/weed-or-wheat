@@ -25,7 +25,7 @@ from scout.vision.sam_client import SamClient
 
 DEMO_DIR = Path(__file__).resolve().parents[2] / "demo"
 _WALK_ID = re.compile(r"[0-9a-f]{16}")
-STEP_NAME = re.compile(r"s\d{1,2}-\d{2,3}\.jpg")  # step picture file names; the route serves nothing else
+STEP_NAME = re.compile(r"s[0-9]{1,2}-[0-9]{2,3}\.jpg")  # step picture file names; the route serves nothing else
 STEP_MAX_PX = 1024
 STEP_QUALITY = 80
 WALK_VERSION = "2"  # bump when the agent or rules change, so old cached reports aren't served for new runs

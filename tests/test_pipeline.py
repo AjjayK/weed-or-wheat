@@ -242,3 +242,13 @@ def test_every_picture_in_the_events_can_be_fetched(tmp_path):
         prefix, name = url.rsplit("/", 1)
         assert prefix == f"/walks/{walk.id}/steps"
         assert pipeline.step_picture(walk.id, name).is_file(), url
+
+
+def test_step_picture_names_are_ascii_digits_only(tmp_path):
+    pipeline = _pipeline(tmp_path, fake_runner)
+    walk_id = "c" * 16
+    steps = tmp_path / "store" / walk_id / "steps"
+    steps.mkdir(parents=True)
+    arabic_zero = "\u0660"  # \d matches this; a step picture name never has it
+    (steps / f"s{arabic_zero}-00.jpg").write_bytes(b"jpeg")
+    assert pipeline.step_picture(walk_id, f"s{arabic_zero}-00.jpg") is None
