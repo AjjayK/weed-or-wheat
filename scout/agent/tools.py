@@ -131,11 +131,13 @@ class ToolResult:
 
 
 class ToolRunner:
-    def __init__(self, state: StopState, sam, weeds: WeedBook, max_calls: int = 12):
+    def __init__(self, state: StopState, sam, weeds: WeedBook, max_calls: int = 12,
+                 time_limit_s: float | None = None):
         self.state = state
         self.sam = sam
         self.weeds = weeds
         self.max_calls = max_calls
+        self.time_limit_s = time_limit_s
 
     def run(self, name: str, args: dict) -> ToolResult:
         handler = getattr(self, f"_tool_{name}", None)
@@ -214,9 +216,13 @@ class ToolRunner:
         return records
 
     def _feedback(self, out: dict, kind: str) -> ToolResult:
-        """Counts against the survey estimate, a hint when weed marks fall short of it, and a picture of the marks."""
+        """Counts against the survey estimate, a hint when weed marks fall short of it, what is left of the budget, and
+        a picture of the marks."""
         plants, areas = self.state.weeds_marked()
         out["weeds_marked"] = {"plants": plants, "weed_areas": areas}
+        out["calls_left"] = max(self.max_calls - self.state.calls, 0)
+        if self.time_limit_s is not None:
+            out["seconds_left"] = max(round(self.time_limit_s - self.state.elapsed_s()), 0)
         estimate = self.state.weeds_estimate
         if estimate is not None:
             out["weeds_estimate"] = estimate

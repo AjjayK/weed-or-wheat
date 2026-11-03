@@ -90,6 +90,9 @@ class StopState:
     def size(self) -> tuple[int, int]:
         return self.image.size
 
+    def elapsed_s(self) -> float:
+        return self._clock() - self.started
+
     def log(self, tool: str, summary: str, instance_ids=(), ok: bool = True) -> AgentStep:
         step = AgentStep(t_ms=int((self._clock() - self.started) * 1000), tool=tool, summary=summary,
                          instance_ids=list(instance_ids), ok=ok)

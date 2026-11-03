@@ -10,6 +10,14 @@ def _state(crop="soybean"):
     return StopState(make_image(100, 100), crop)
 
 
+def test_elapsed_seconds_count_from_when_the_stop_started():
+    now = [50.0]
+    state = StopState(make_image(100, 100), "soybean", clock=lambda: now[0])
+    assert state.elapsed_s() == 0
+    now[0] = 62.5
+    assert state.elapsed_s() == 12.5
+
+
 def test_boxes_convert_between_thousandths_and_pixels():
     assert to_pixels([100, 200, 300, 400], (100, 50)) == (10, 10, 30, 20)
     assert to_thousandths((10, 10, 30, 20), (100, 50)) == [100, 200, 300, 400]

@@ -311,6 +311,25 @@ def test_no_hint_once_a_weed_area_exists_because_its_pieces_are_not_plant_counts
     assert out["weeds_marked"] == {"plants": 1, "weed_areas": 1} and "hint" not in out
 
 
+def test_a_mark_answer_says_how_many_calls_and_seconds_are_left():
+    runner, state = _runner(max_calls=12)
+    out = _mark(runner, "weed", WEED_A)
+    assert out["calls_left"] == 12 and "seconds_left" not in out  # no time limit given: no seconds
+    state.calls = 5
+    assert _mark(runner, "weed", WEED_B)["calls_left"] == 7
+    state.calls = 20
+    assert _mark(runner, "weed", WEED_A)["calls_left"] == 0  # never negative
+
+    now = [100.0]
+    state = StopState(make_image(100, 100), "soybean", clock=lambda: now[0])
+    runner = ToolRunner(state, FakeSam(), small_weedbook(), max_calls=12, time_limit_s=360)
+    assert _mark(runner, "weed", WEED_A)["seconds_left"] == 360
+    now[0] = 140.4
+    assert _mark(runner, "weed", WEED_B)["seconds_left"] == 320
+    now[0] = 900.0
+    assert _mark(runner, "crop", ROW)["seconds_left"] == 0  # a crop mark says it too, and it never goes negative
+
+
 def test_a_crop_mark_never_gets_the_weed_hint():
     runner, state = _runner(FakeSam(scene={"row": rect(10, 0, 30, 100)}), image=field_photo())
     runner.run("survey", {"crop_seen": "soybean", "weeds_visible": 10})

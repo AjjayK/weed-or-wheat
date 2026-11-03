@@ -267,6 +267,15 @@ def test_time_limit_closes_the_stop_after_the_turn_in_progress():
     assert result.steps[-1].tool == "limit" and result.steps[-1].ok is False
 
 
+def test_the_stop_gives_the_tools_its_time_budget():
+    now = [0.0]
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", [_classify("s0-i3"), *_close()], "")])
+    settings = replace(SETTINGS, max_tool_calls=20, stop_timeout_s=360)
+    _run(llm, settings=settings, clock=lambda: now[0])
+    told = json.loads(next(p["output"] for p in llm.requests[1]["input"] if p.get("type") == "function_call_output"))
+    assert told["calls_left"] == 19 and told["seconds_left"] == 360  # this mark was call 1 of 20
+
+
 def test_weed_free_top_down_stop_has_zero_density():
     llm = FakeLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", _close("top_down"), "")])
     result, _ = _run(llm)
@@ -399,6 +408,7 @@ def test_instructions_guard_against_over_marking_and_keep_calls_for_the_end():
     corn = stop_instructions("corn", ["field_horsetail"], 30)
     assert corn.count("Never box crop, soil or residue") >= 2 and "your estimate was high" in corn
     assert "call survey again" in corn  # the stored estimate is what marks are checked against
+    assert "seconds you have left" in corn and "tool calls and seconds" in corn
     assert "keep your last 4" in corn and "together in one turn" in corn and "even if it is not corn" in corn
     assert 'classify it as role "crop" or "ignore"' in corn and "Don't also box plants inside a weed area" in corn
     alfalfa = stop_instructions("alfalfa", ["dandelion"], 30)

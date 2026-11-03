@@ -37,7 +37,8 @@ plants inside a weed area.
 Never box crop, soil or residue as a weed.
 2. After a turn with marks you get one picture of everything marked so far: green is crop, magenta is weed, gray \
 is the in-row zone, blue boxes are weed areas, yellow boxes need a check. The answer to the last weed or patch mark \
-has the current counts and compares them with your survey estimate. Compare the picture with the photo:
+has the current counts and compares them with your survey estimate. Each mark answer also says how many tool calls \
+and seconds you have left. Compare the picture with the photo:
 - weeds still unmarked: mark them, as boxes or weed areas;
 - a crop leaf magenta inside a weed area: mark that leaf with kind "crop";
 - magenta on crop, soil or residue outside a weed area: a wrong weed box; classify it as role "crop" or "ignore" \

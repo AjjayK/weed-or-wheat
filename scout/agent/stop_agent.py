@@ -56,7 +56,7 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
              on_step: Callable[[AgentStep], None] | None = None,
              clock: Callable[[], float] = time.monotonic) -> tuple[StopResult, StopState]:
     state = StopState(image, crop, on_step=on_step, clock=clock)
-    runner = ToolRunner(state, sam, weeds, max_calls=settings.max_tool_calls)
+    runner = ToolRunner(state, sam, weeds, max_calls=settings.max_tool_calls, time_limit_s=settings.stop_timeout_s)
     ask = dict(instructions=stop_instructions(crop, weeds.ids(), settings.max_tool_calls), tools=TOOL_SCHEMAS)
     pending: list[dict] = [user_message(f"Stop {image.index + 1}: one photo of a {crop} field. Boxes are 0 to 1000 "
                                         "on both axes.", [image.work_data_url])]
