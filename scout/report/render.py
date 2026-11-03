@@ -21,20 +21,24 @@ def _blank(value) -> object:
     return "" if value is None else value
 
 
+def decision_text(report: FieldReport) -> str:
+    """The decision as people read it, e.g. "Treat (spot)"."""
+    return OUTCOME_TEXT[report.decision] + (f" ({report.treat_mode})" if report.treat_mode else "")
+
+
 def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int], str]) -> str:
     ok = [s for s in report.stops if s.status == "ok"]
     measured = [s for s in ok if s.view_type != "close_up"] or ok  # the stops rules.py averages
     densities = [s.density_per_m2 for s in ok if s.density_per_m2 is not None]
     names = {s.species_id: weeds.get(s.species_id).common_name if s.species_id in weeds else s.species_id
              for s in report.species_summary}
-    decision = OUTCOME_TEXT[report.decision] + (f" ({report.treat_mode})" if report.treat_mode else "")
     return _ENV.get_template("report.html").render(
         report=report,
         mean_cover=sum(s.weed_cover_pct for s in measured) / len(measured) if measured else 0.0,
         density_text=f"{sum(densities) / len(densities):.1f} /m²" if densities else "—",
         stops_with_weeds=sum(1 for s in ok if s.weed_count),
         ok_count=len(ok),
-        decision_text=decision,
+        decision_text=decision_text(report),
         names=names,
         outcome_text=OUTCOME_TEXT,
         overlay_url=overlay_url,

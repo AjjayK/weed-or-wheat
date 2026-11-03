@@ -21,7 +21,7 @@ from scout.app.ingest import StopImage
 from scout.config import Settings
 from scout.labels.lookup import load_records
 from scout.models import FieldReport, StopResult
-from scout.report.render import OUTCOME_TEXT
+from scout.report.render import decision_text
 from scout.vision.sam_client import SamClient
 
 DEMO_DIR = Path(__file__).resolve().parents[2] / "demo"
@@ -126,7 +126,7 @@ class Pipeline:
             thumbnail = next((e.get("picture") for e in events if e.get("type") == "stop_start"), None)
             decision = None
             if report is not None:
-                decision = OUTCOME_TEXT[report.decision] + (f" ({report.treat_mode})" if report.treat_mode else "")
+                decision = decision_text(report)
             out.append({**sample, "thumbnail": thumbnail, "decision": decision,
                         "stops": len(report.stops) if report else None})
         return out

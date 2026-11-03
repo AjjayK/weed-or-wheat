@@ -2,7 +2,7 @@ import re
 
 from scout.labels.epa import PDF_BASE
 from scout.models import FieldReport, LabelOption, SpeciesSummary, StopResult, UseRecord
-from scout.report.render import CSV_COLUMNS, report_csv, report_html
+from scout.report.render import CSV_COLUMNS, decision_text, report_csv, report_html
 from tests.helpers import small_weedbook
 
 
@@ -36,6 +36,14 @@ def test_html_has_decision_options_and_overlays():
     assert "/walks/w1/overlay/0.png" in html and "Read the label before use" in html
     assert f"{PDF_BASE}000100-00001-20240101.pdf#page=3" in html and "Check s0-i6: low confidence" in html
     assert "leaflet" not in html
+
+
+def test_decision_text_names_the_outcome_and_how_to_treat():
+    assert decision_text(_report()) == "Treat (broadcast)"
+    quiet = _report().model_copy(update={"decision": "no_action", "treat_mode": None})
+    assert decision_text(quiet) == "No action"
+    again = quiet.model_copy(update={"decision": "scout_again"})
+    assert decision_text(again) == "Scout again in 5–7 days"
 
 
 def test_options_table_names_the_weed_each_row_is_for():
