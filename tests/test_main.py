@@ -181,9 +181,14 @@ def test_unknown_walk_is_404_and_samples_listed(tmp_path):
     assert client.get("/samples").json()[0]["name"] == "Sample"
 
 
-def test_crop_menu_makes_the_farmer_choose(tmp_path):
+def test_page_has_crop_cards_drop_zone_and_live_view(tmp_path):
     html = _client(tmp_path).get("/").text
-    assert '<option value="" disabled selected>Choose the crop</option>' in html
+    for crop in ("corn", "soybean", "alfalfa"):
+        assert f'<input type="radio" name="crop" value="{crop}" required>' in html
+    assert "checked" not in html
+    for part in ('id="drop-zone"', 'id="live-view"', 'id="strip"', 'id="stage-img"', 'aria-live="polite"',
+                 'id="checklist"', "Scout this field"):
+        assert part in html
 
 
 def _saved_walk(root, walk_id, events):

@@ -3,37 +3,84 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Weed scout</title>
+<title>Weed Scout</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Domine:wght@400..700&family=Public+Sans:ital,wght@0,400..700;1,400&display=swap">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<main>
-  <h1>Weed scout</h1>
-  <p class="lede">Upload the photos from one walk through one field. An agent finds the weeds, measures them, and checks herbicide labels.</p>
-  <form id="walk-form">
-    <label>Crop
-      <select name="crop" required>
-        <option value="" disabled selected>Choose the crop</option>
-        <option value="soybean">Soybean</option>
-        <option value="corn">Corn</option>
-        <option value="alfalfa">Alfalfa</option>
-      </select>
-    </label>
-    <label>Photos (1 to 10)
-      <input type="file" name="files" accept="image/*,.heic,.heif" multiple required>
-    </label>
-    <button type="submit">Scout this field</button>
-    <p id="form-error" class="error" hidden></p>
-  </form>
-  <section id="samples" hidden>
-    <h2>Or open a sample walk</h2>
-    <ul id="sample-list"></ul>
+<main id="upload-view">
+  <header class="hero">
+    <p class="kicker">Weed Scout</p>
+    <h1>Walk the field. Upload the photos. Get a spray call you can check.</h1>
+    <p class="lede">An agent finds and measures every weed, checks it against extension thresholds, and lists EPA label options with page citations.</p>
+  </header>
+  <div class="columns">
+    <form id="walk-form" class="card" novalidate>
+      <fieldset>
+        <legend>1 · Which crop?</legend>
+        <div class="crop-cards">
+          <label class="crop-card"><input type="radio" name="crop" value="corn" required><span>Corn</span></label>
+          <label class="crop-card"><input type="radio" name="crop" value="soybean" required><span>Soybean</span></label>
+          <label class="crop-card"><input type="radio" name="crop" value="alfalfa" required><span>Alfalfa</span></label>
+        </div>
+      </fieldset>
+      <div>
+        <p class="field-label" id="photos-label">2 · Photos from one walk (1 to 10)</p>
+        <label class="drop-zone" id="drop-zone">
+          <input type="file" id="files" accept="image/*,.heic,.heif" multiple aria-labelledby="photos-label">
+          <span id="drop-text">Drop photos here or tap to choose</span>
+        </label>
+        <div id="thumbs" class="thumbs"></div>
+      </div>
+      <button type="submit" class="primary" id="scout-button">Scout this field</button>
+      <p id="form-error" class="error" role="alert" hidden></p>
+    </form>
+    <section id="samples" class="samples" hidden>
+      <h2>Or watch a sample walk</h2>
+      <div id="sample-list"></div>
+    </section>
+  </div>
+  <footer class="footnote">Pins are shifted for privacy. Decision support, not a prescription.</footer>
+</main>
+
+<main id="live-view" hidden>
+  <header class="live-header">
+    <div>
+      <p class="kicker">Weed Scout</p>
+      <h1 id="live-title">Scouting the field</h1>
+      <p class="muted" id="live-progress-text">Starting…</p>
+    </div>
+    <div class="live-meta">
+      <span id="replay-badge" class="badge" hidden>Replay, 4× speed</span>
+      <a id="skip-link" href="#" hidden>Skip to report</a>
+      <span id="elapsed" class="muted">0:00</span>
+    </div>
+  </header>
+  <div class="progress"><div id="progress-bar"></div></div>
+  <div class="strip-row">
+    <div id="strip" class="strip"></div>
+    <button type="button" id="follow-live" class="ghost" hidden>Follow live</button>
+  </div>
+  <section class="stage">
+    <figure class="stage-picture">
+      <div class="picture-frame"><img id="stage-img" alt=""></div>
+      <figcaption id="stage-caption" class="muted"></figcaption>
+    </figure>
+    <aside class="stage-side">
+      <ol id="checklist" class="checklist"></ol>
+      <p id="stage-counts" class="counts"></p>
+    </aside>
+    <div class="thought" aria-live="polite">
+      <p id="thought-text"></p>
+      <ul id="thought-detail"></ul>
+    </div>
   </section>
-  <section id="progress" hidden>
-    <h2>Agent steps</h2>
-    <div id="stops"></div>
-    <p id="status" class="muted"></p>
-  </section>
+  <div id="live-end" class="live-end" hidden>
+    <a id="report-link" class="primary button" href="#">See the report</a>
+  </div>
+  <p id="live-status" class="muted"></p>
 </main>
 <script src="/static/app.js"></script>
 </body>
