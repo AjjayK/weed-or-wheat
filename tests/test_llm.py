@@ -111,3 +111,28 @@ def test_is_lost_response():
     assert is_lost_response(BadRequest("Referenced Response Not Found"))
     assert not is_lost_response(BadRequest("image too large"))
     assert not is_lost_response(ValueError("referenced response not found or expired"))  # only a rejected request
+
+
+def test_reasoning_summaries_are_asked_for_and_read():
+    seen = {}
+
+    def create(**kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return _response([NS(type="reasoning", summary=[NS(type="summary_text", text="Counting weeds."),
+                                                         NS(type="summary_text", text="Boxing the rows.")]),
+                          NS(type="message", role="assistant",
+                             content=[NS(type="output_text", text="Scouting the rows.")]),
+                          NS(type="function_call", call_id="c1", name="survey", arguments="{}")],
+                         text="Scouting the rows.")
+
+    turn = Llm(create, "m").turn("x", reasoning_summary=True)
+    assert seen["reasoning"] == {"summary": "auto"}
+    assert turn.reasoning == ["Counting weeds.", "Boxing the rows."] and turn.text == "Scouting the rows."
+    Llm(create, "m").turn("x")
+    assert "reasoning" not in seen
+
+
+def test_reasoning_without_summaries_is_empty():
+    turn = Llm(lambda **k: _response([NS(type="reasoning")]), "m").turn("x")
+    assert turn.reasoning == []

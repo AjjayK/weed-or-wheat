@@ -26,6 +26,7 @@ class LlmTurn:
     # The response's output as input items that can be replayed without previous_response_id: function calls with
     # their raw argument strings, and assistant text. Reasoning items are left out.
     output_items: list[dict] = field(default_factory=list)
+    reasoning: list[str] = field(default_factory=list)  # the reasoning summary lines, when asked for
 
 
 def is_lost_response(error: Exception) -> bool:
@@ -59,7 +60,8 @@ class Llm:
         return cls(client.responses.create, settings.agent_model)
 
     def turn(self, input, instructions: str | None = None, tools: list[dict] | None = None,
-             previous_response_id: str | None = None, text_format: dict | None = None) -> LlmTurn:
+             previous_response_id: str | None = None, text_format: dict | None = None,
+             reasoning_summary: bool = False) -> LlmTurn:
         kwargs: dict[str, Any] = {"model": self.model, "input": input}
         if instructions:
             kwargs["instructions"] = instructions
@@ -69,15 +71,19 @@ class Llm:
             kwargs["previous_response_id"] = previous_response_id
         if text_format:
             kwargs["text"] = {"format": text_format}
+        if reasoning_summary:  # readable lines of the model's thinking, shown to people watching the agent
+            kwargs["reasoning"] = {"summary": "auto"}
         response = with_retry(lambda: self._create(**kwargs), sleep=self._sleep)
         status = getattr(response, "status", None)
         if status in ("failed", "incomplete", "cancelled"):
             detail = getattr(response, "incomplete_details", None) or getattr(response, "error", None)
             raise LlmError(f"Muse Spark response {response.id} was {status}: {detail}")
-        calls, items = [], []
+        calls, items, reasoning = [], [], []
         for item in response.output:
             kind = getattr(item, "type", None)
-            if kind == "message" and getattr(item, "role", "assistant") == "assistant":
+            if kind == "reasoning":
+                reasoning += [part.text for part in getattr(item, "summary", None) or [] if getattr(part, "text", None)]
+            elif kind == "message" and getattr(item, "role", "assistant") == "assistant":
                 text = "".join(part.text for part in item.content or [] if getattr(part, "type", None) == "output_text")
                 if text:
                     items.append({"role": "assistant", "content": text})
@@ -91,4 +97,4 @@ class Llm:
                 calls.append(ToolCall(item.call_id, item.name, arguments))
                 items.append({"type": "function_call", "call_id": item.call_id, "name": item.name,
                               "arguments": item.arguments or "{}"})
-        return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "", items)
+        return LlmTurn(response.id, calls, getattr(response, "output_text", "") or "", items, reasoning)
