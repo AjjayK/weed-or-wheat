@@ -20,6 +20,7 @@ UNMARKED_FLAG = "Some weeds may be unmarked: cover and count are minimums"
 MAX_CHECK_FLAGS = 10  # per-plant "Check ..." lines shown for one stop; the rest are counted in one line
 THOUGHT_LINES = 4  # reasoning lines kept per turn
 THOUGHT_MAX_CHARS = 200
+THOUGHT_SUMMARY_MAX_CHARS = 300  # the summary shows in large type on the live view
 
 
 def run_order(calls: list[ToolCall]) -> list[ToolCall]:
@@ -88,7 +89,7 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
             history += turn.output_items
             thought = (turn.text or "").strip()
             if thought or turn.reasoning:  # what the agent is thinking, for people watching; before the turn's tools
-                state.log("think", thought or turn.reasoning[0],
+                state.log("think", (thought or turn.reasoning[0])[:THOUGHT_SUMMARY_MAX_CHARS],
                           detail=[line[:THOUGHT_MAX_CHARS] for line in turn.reasoning[:THOUGHT_LINES]])
             if not turn.calls:
                 if nudged:

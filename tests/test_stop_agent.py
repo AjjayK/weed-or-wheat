@@ -446,3 +446,13 @@ def test_marks_and_zooms_save_pictures_through_the_sink():
     result, _ = _run(llm, picture_sink=lambda image: saved.append(image.size) or f"s0-{len(saved):02d}.jpg")
     assert [(s.tool, s.picture) for s in result.steps if s.picture] == [
         ("mark", "s0-01.jpg"), ("mark", "s0-02.jpg"), ("zoom", "s0-03.jpg")]
+
+
+def test_a_long_narration_is_capped_in_the_think_summary():
+    turn = LlmTurn("r1", [MARK_CROP], "x" * 500, [], ["y" * 500])
+    llm = FakeLlm([turn, LlmTurn("r2", _close("top_down"), "")])
+    result, _ = _run(llm)
+    assert result.steps[0].tool == "think" and result.steps[0].summary == "x" * 300
+    reasoning_only = FakeLlm([LlmTurn("r1", [MARK_CROP], "", [], ["y" * 500]), LlmTurn("r2", _close("top_down"), "")])
+    result, _ = _run(reasoning_only)
+    assert result.steps[0].summary == "y" * 300
