@@ -4,6 +4,7 @@
   --serif: "Domine", Georgia, serif; --sans: "Public Sans", system-ui, sans-serif;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--page); color: var(--text); font: 16px/1.55 var(--sans); }
 main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
 main[hidden] { display: none; }
