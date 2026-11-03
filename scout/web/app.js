@@ -43,7 +43,7 @@ function setFiles(files) {
       const img = el("img");
       img.alt = "";
       img.src = URL.createObjectURL(file);
-      img.onload = () => URL.revokeObjectURL(img.src);
+      img.onload = img.onerror = () => URL.revokeObjectURL(img.src);
       thumbs.append(img);
     }
   }
@@ -129,6 +129,7 @@ function openLive(walkId, crop, push) {
   live.timer = setInterval(() => { if (!live.replay) $("elapsed").textContent = clock((Date.now() - live.startedAt) / 1000); }, 1000);
   live.source = new EventSource(`/walks/${walkId}/events`);
   live.source.onmessage = (message) => handle(JSON.parse(message.data));
+  live.source.onopen = () => setStatus("");  // back after "Reconnecting…", which a long agent turn would leave up
   live.source.onerror = () => {
     if (live.source.readyState === EventSource.CLOSED) {
       setStatus("This walk isn't running any more.", true);
@@ -187,7 +188,8 @@ function touch(stop) {
   stop.seenAt = Date.now();
   if (!live.pinned) {
     const current = live.stops.get(live.focus);
-    const idle = !current || current.status !== "working" || Date.now() - (current.seenAt || 0) > FOLLOW_HOLD_MS;
+    // A photo that just finished keeps the stage for the hold too, so its final overlay is seen.
+    const idle = !current || current.status === "waiting" || Date.now() - (current.seenAt || 0) > FOLLOW_HOLD_MS;
     if (current === stop || idle) live.focus = stop.index;
   }
   render();
@@ -220,6 +222,7 @@ function applyStep(stop, event) {
   const areas = summary.match(/^Mark patch: (\d+) of/);
   if (areas) stop.areas += Number(areas[1]);
   if (event.ok === false) stop.problem = summary; else stop.problem = "";
+  stop.lastSummary = summary;
   const key = phaseOf(stop, event);
   if (!key) return;
   const at = PHASES.findIndex(([k]) => k === key);
@@ -254,8 +257,14 @@ function countsLine(stop) {
 function showPicture(url, caption) {
   const img = $("stage-img");
   img.alt = caption;
-  if (!url || img.dataset.src === url) return;
-  img.dataset.src = url;
+  if (img.dataset.src === (url || "")) return;
+  img.dataset.src = url || "";
+  img.hidden = !url;  // never another photo's picture under this photo's caption
+  if (!url) {
+    img.removeAttribute("src");
+    img.classList.remove("fading");
+    return;
+  }
   img.classList.add("fading");
   const next = new Image();
   next.onload = () => {
@@ -263,6 +272,7 @@ function showPicture(url, caption) {
     img.src = url;
     img.classList.remove("fading");
   };
+  next.onerror = () => { if (img.dataset.src === url) img.classList.remove("fading"); };
   next.src = url;
 }
 
@@ -270,7 +280,8 @@ function render() {
   for (const stop of live.stops.values()) {
     const b = stop.button;
     b.dataset.status = stop.status;
-    b.setAttribute("aria-label", `${stop.name}, ${stop.status}`);
+    b.setAttribute("aria-label", `Photo ${stop.index + 1}, ${stop.status}`);
+    b.title = stop.name;
     b.setAttribute("aria-current", String(stop.index === live.focus));
     if (stop.thumb) b.style.backgroundImage = `url("${stop.thumb}")`;
     b.querySelector(".mark").textContent = stop.status === "done" ? "✓" : stop.status === "failed" ? "!" : "";
@@ -281,8 +292,13 @@ function render() {
   const caption = $("stage-caption");
   caption.textContent = `${stop.name} · ${stop.problem || stop.caption || "waiting to start"}`;
   caption.classList.toggle("problem", Boolean(stop.problem) && stop.status === "failed");
-  $("thought-text").textContent = stop.thought ? `“${stop.thought}”` : "";
-  $("thought-detail").replaceChildren(...stop.detail.slice(0, 3).map((line) => el("li", null, line)));
+  const thought = stop.thought ? `“${stop.thought}”` : "";
+  const shown = [thought, ...stop.detail.slice(0, 3)].join("\n");
+  if ($("thought-text").dataset.shown !== shown) {  // the area is aria-live: rewrite it only when it changes
+    $("thought-text").dataset.shown = shown;
+    $("thought-text").textContent = thought;
+    $("thought-detail").replaceChildren(...stop.detail.slice(0, 3).map((line) => el("li", null, line)));
+  }
   $("checklist").replaceChildren(...PHASES.map(([key, label]) => {
     const phase = stop.phases[key];
     const item = el("li", phase.state);
@@ -303,7 +319,7 @@ function ended() {
   if (live.source) live.source.close();
   $("live-end").hidden = false;
   $("live-progress-text").textContent = "Report ready";
-  setTimeout(() => { if (!live.pinned) location.href = live.reportUrl; }, 3000);
+  setTimeout(() => { if (!live.pinned) location.replace(live.reportUrl); }, 3000);  // Back skips the finished walk
 }
 
 function handle(event) {
@@ -356,6 +372,8 @@ function handle(event) {
       const stop = stopFor(event.stop);
       stop.status = event.status === "failed" ? "failed" : "done";
       stop.final = event;
+      // A failed photo shows its last step in red; a finished one drops a passing problem for "Final overlay".
+      stop.problem = stop.status === "failed" ? stop.problem || stop.lastSummary || "This photo could not be analyzed" : "";
       if (event.picture) {
         stop.picture = event.picture;
         stop.caption = "Final overlay";
