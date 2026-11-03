@@ -11,7 +11,7 @@ from scout.agent.state import StopState
 from scout.app import pipeline as pipeline_module
 from scout.app.pipeline import Pipeline, Walk, walk_id_for
 from scout.config import Settings
-from scout.models import StopResult
+from scout.models import FieldReport, StopResult
 from tests.helpers import FakeLlm, make_image, small_weedbook
 
 
@@ -316,3 +316,14 @@ def test_a_sample_that_cannot_be_read_comes_back_bare_and_one_without_an_id_is_s
     assert samples[0]["stops"] == 1 and samples[0]["decision"] == "No action" and samples[0]["thumbnail"]
     assert samples[1] == {"walk_id": broken.id, "name": "Broken", "thumbnail": None, "decision": None, "stops": None}
     assert broken.id in caplog.text
+
+
+def test_unreadable_saved_events_count_as_none(tmp_path):
+    pipeline = _pipeline(tmp_path, fake_runner)
+    folder = tmp_path / "demo" / "0123456789abcdef"
+    folder.mkdir(parents=True)
+    report = FieldReport(walk_id="0123456789abcdef", crop="corn", stops=[], species_summary=[], decision="no_action",
+                         rule_trace=[], explanation="x", options=[])
+    (folder / "report.json").write_text(report.model_dump_json())
+    (folder / "events.json").write_text('[{"type": "walk_st')
+    assert pipeline.saved_events("0123456789abcdef") is None

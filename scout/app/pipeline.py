@@ -103,7 +103,11 @@ class Pipeline:
         path = folder / "events.json" if folder else None
         if path is None or not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):  # the report still opens: the walk just isn't replayed
+            log.warning("saved events for %s could not be read", walk_id, exc_info=True)
+            return None
 
     def step_picture(self, walk_id: str, name: str) -> Path | None:
         """A running walk's pictures are in the store before its report exists, so this doesn't use find_dir."""
