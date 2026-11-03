@@ -213,7 +213,7 @@ function applyStep(stop, event) {
   if (weeds) stop.plants += Number(weeds[1]);
   const areas = summary.match(/^Mark patch: (\d+) of/);
   if (areas) stop.areas += Number(areas[1]);
-  if (event.ok === false) stop.problem = summary;
+  if (event.ok === false) stop.problem = summary; else stop.problem = "";
   const key = phaseOf(stop, event);
   if (!key) return;
   const at = PHASES.findIndex(([k]) => k === key);
