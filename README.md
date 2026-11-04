@@ -47,5 +47,11 @@ In [Cloud Shell](https://shell.cloud.google.com), with a project that has billin
 
 `--max-instances 1` is required: a running walk lives in the server's memory, so every request must reach the same instance. `--no-cpu-throttling` keeps a walk going if the viewer closes the page. Cloud Run caps an upload at 32 MiB, so the page limits a walk's photos to 30 MB in all.
 
+New walks are limited per hour by two environment variables: `WALKS_PER_IP_PER_HOUR` (default 10) and `WALKS_PER_HOUR` (default 30, site-wide). Sample walks and repeat uploads of the same photos don't count. Change a limit without rebuilding:
+
+    gcloud run services update weed-scout --region us-central1 --update-env-vars WALKS_PER_HOUR=50
+
+That starts a new revision, which ends any walk in progress and forgets fresh walks' reports (the container's disk is its memory, and a 10-photo walk saves about 30 MB). The limits don't set the Cloud Run bill; `--max-instances 1` does. One instance with 1 vCPU and 2 GiB costs about $0.08 an hour while it's up and scales to zero when idle, and roughly the first 60 hours each month are free.
+
 ## Limits
 Decision support, not a prescription. Read the label before use; the label is the law. Density is only reported for straight-down photos. Weed counts in weed areas are approximate. Thresholds marked "tool default" are not from an agronomic source.

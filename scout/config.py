@@ -20,8 +20,10 @@ class Settings:
     max_concurrent_stops: int = 10  # every photo of a walk at once: the walk takes as long as its slowest stop
     max_photos: int = 10
     max_upload_bytes: int = 25_000_000
-    walks_per_ip_per_hour: int = 3
-    walks_per_hour: int = 20  # site-wide; X-Forwarded-For can be faked, so this is the real cost guard
+    walks_per_ip_per_hour: int = 10  # room for judges who share one office IP
+    # Site-wide; X-Forwarded-For can be faked, so this is the real guard. Cloud Run's disk is the instance's
+    # memory and a 10-photo walk saves ~30 MB, so this also keeps the one instance from filling its RAM.
+    walks_per_hour: int = 30
     offset_gps: bool = True  # public site: shift every walk's pins by one random offset
 
 
@@ -30,4 +32,6 @@ def get_settings() -> Settings:
         api_key=os.environ.get("MODEL_API_KEY", ""),
         agent_model=os.environ.get("AGENT_MODEL", "muse-spark-1.3"),
         sam_model=os.environ.get("SAM_MODEL", "sam-3.1"),
+        walks_per_ip_per_hour=int(os.environ.get("WALKS_PER_IP_PER_HOUR", Settings.walks_per_ip_per_hour)),
+        walks_per_hour=int(os.environ.get("WALKS_PER_HOUR", Settings.walks_per_hour)),
     )
