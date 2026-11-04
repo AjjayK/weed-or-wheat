@@ -1,5 +1,7 @@
 # Weed scout
 
+**Live demo: https://weed-scout-939814041857.us-central1.run.app** (the sample walks replay instantly; a fresh walk takes about 4 to 6 minutes)
+
 Upload the photos from one walk through one field. A Muse Spark agent drives SAM 3.1 to separate weeds from crop at every stop, code measures weed intensity and applies threshold rules, and the report lists herbicide options whose EPA label covers this crop, this weed, and this weed size, each with a page citation.
 
 While a walk runs, you watch the agent work photo by photo: each marking picture, each close-up, the final overlay, and the agent's own reasoning. The sample walks replay a saved run, so they cost nothing to open.
