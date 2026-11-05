@@ -84,6 +84,8 @@ class StopState:
         self.crop_seen: str | None = None  # from survey
         self.weeds_estimate: int | None = None  # from survey: weed plants the agent sees
         self.all_weeds_marked: bool | None = None  # from finish; None when the stop never finished
+        # instance id -> (species, confidence) from identify's panel; species is None when no one named it
+        self.identified: dict[str, tuple[str | None, str]] = {}
         self._green: np.ndarray | None = None
         self.finished = False
         self._next = 0

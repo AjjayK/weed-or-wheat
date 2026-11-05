@@ -107,3 +107,13 @@ def test_urgency_branches():
 def test_urgency_ignores_limits_the_weed_already_exceeds():
     assert urgency(4.0, [_option(2.0), _option(6.0)]).startswith("Treat within ~7 days")  # the 6-in label fits
     assert urgency(7.0, [_option(2.0), _option(6.0)]) == "Beyond label size limit (7 in vs 6 in)"
+
+
+def test_a_weed_off_the_catalog_is_named_and_graded_on_the_tool_default():
+    book = BOOK.copy()
+    sid = book.register("burcucumber", "Sicyos angulatus", "broadleaf")
+    d = decide([_stop(0, {sid: 3}, {sid: 6.0})], book)
+    summary = d.summaries[0]
+    assert (summary.common_name, summary.scientific_name, summary.outcome) == (
+        "burcucumber", "Sicyos angulatus", "treat")
+    assert "burcucumber: 6 % cover vs threshold 5 (tool default, not from a source) -> treat" in d.rule_trace

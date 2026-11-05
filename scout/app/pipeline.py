@@ -19,7 +19,7 @@ from scout.agent.stop_agent import run_stop
 from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import StopImage
 from scout.config import Settings
-from scout.labels.lookup import load_records
+from scout.labels.lookup import adopt_label_species, load_records
 from scout.models import FieldReport, StopResult
 from scout.report.render import decision_text
 from scout.vision.sam_client import SamClient
@@ -29,7 +29,7 @@ _WALK_ID = re.compile(r"[0-9a-f]{16}")
 STEP_NAME = re.compile(r"s[0-9]{1,2}-[0-9]{2,3}\.jpg")  # step picture file names; the route serves nothing else
 STEP_MAX_PX = 1024
 STEP_QUALITY = 80
-WALK_VERSION = "3"  # bump when the agent or rules change, so old cached reports aren't served for new runs
+WALK_VERSION = "4"  # bump when the agent or rules change, so old cached reports aren't served for new runs
 log = logging.getLogger(__name__)
 
 
@@ -76,11 +76,12 @@ class Pipeline:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "Pipeline":
-        records = load_records()
+        weeds = WeedBook.load()
+        records = adopt_label_species(load_records(), weeds)  # the labels' weeds join the catalog's
         if not records:
             log.warning("The label table is empty: every report will say no product matches. "
                         "Build it with scout.labels.build_labels.")
-        return cls(Llm.from_settings(settings), SamClient.from_settings(settings), WeedBook.load(), records,
+        return cls(Llm.from_settings(settings), SamClient.from_settings(settings), weeds, records,
                    settings, Path(os.environ.get("SCOUT_STORE", "store")))
 
     def find_dir(self, walk_id: str) -> Path | None:
@@ -156,12 +157,13 @@ class Pipeline:
                 walk.emit({"type": "walk_start", "crop": walk.crop,
                            "budget": {"calls": self.settings.max_tool_calls, "seconds": self.settings.stop_timeout_s},
                            "stops": [{"stop": image.index, "name": name} for image, name in zip(images, names)]})
+                weeds = self.weeds.copy()  # this walk's stops share the weeds they name off the catalog
                 with ThreadPoolExecutor(max_workers=self.settings.max_concurrent_stops) as pool:
-                    stops = list(pool.map(lambda image: self._stop(walk, image, out_dir), images))
+                    stops = list(pool.map(lambda image: self._stop(walk, image, out_dir, weeds), images))
                 if all(stop.status == "failed" for stop in stops):  # an outage or a bad key: don't cache it
                     raise RuntimeError("no stop could be analyzed")
                 walk.emit({"type": "report_building"})
-                report = build_report(walk.id, walk.crop, stops, self.weeds, self.records, self.llm)
+                report = build_report(walk.id, walk.crop, stops, weeds, self.records, self.llm)
                 _write_atomic(out_dir / "report.json", report.model_dump_json(indent=1))
             walk.report = report
             walk.emit({"type": "report_ready"})
@@ -177,7 +179,8 @@ class Pipeline:
             walk.emit({"type": "error", "message": "The walk couldn't be analyzed. Try again."})
             walk.status = "failed"
 
-    def _stop(self, walk: Walk, image: StopImage, out_dir: Path) -> StopResult:
+    def _stop(self, walk: Walk, image: StopImage, out_dir: Path, weeds: WeedBook | None = None) -> StopResult:
+        weeds = weeds if weeds is not None else self.weeds
         numbers = itertools.count()
 
         def save(picture: Image.Image) -> str:
@@ -207,7 +210,7 @@ class Pipeline:
         walk.emit({"type": "stop_start", "stop": image.index, "picture": url(try_save(image.work))})
         final = None
         try:
-            result, state = self._stop_runner(image, walk.crop, self.llm, self.sam, self.weeds, self.settings,
+            result, state = self._stop_runner(image, walk.crop, self.llm, self.sam, weeds, self.settings,
                                               on_step=on_step, picture_sink=save)
             overlay = state.overlay()
             overlay.save(out_dir / f"stop_{image.index}.png")

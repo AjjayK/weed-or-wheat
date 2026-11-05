@@ -66,8 +66,11 @@ def decide(stops: list[StopResult], weeds: WeedBook) -> Decision:
         # Cover is graded too when a stop that shows this species has no density measure or only an approximate
         # count; the more severe outcome wins.
         also_cover = any(sid in s.species and (s.species_density is None or s.count_approximate) for s in measured)
-        outcome, line = _species_outcome(weeds.get(sid), present, n, mean_cover, mean_density, also_cover)
-        summaries.append(SpeciesSummary(species_id=sid, stops_present=present, frequency=round(present / n, 2),
+        info = weeds.get(sid)
+        outcome, line = _species_outcome(info, present, n, mean_cover, mean_density, also_cover)
+        summaries.append(SpeciesSummary(species_id=sid, common_name=info.common_name,
+                                        scientific_name=info.scientific_name or None,
+                                        stops_present=present, frequency=round(present / n, 2),
                                         mean_cover_pct=mean_cover, mean_density_per_m2=mean_density,
                                         max_height_in=max(heights) if heights else None, outcome=outcome))
         trace.append(line)

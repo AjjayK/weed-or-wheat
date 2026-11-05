@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from pypdf import PdfReader
 
 from scout.agent.llm import user_message
-from scout.agronomy.weeds import WeedBook
+from scout.agronomy.weeds import WeedBook, is_generic
 from scout.labels.epa import ProductFacts
 from scout.models import UseRecord
 
@@ -40,19 +40,25 @@ _RECORD_PROPERTIES = {
     "page": {"type": "integer"},
     "quote": {"type": "string"},
 }
-USE_RECORDS_FORMAT = {
-    "type": "json_schema",
-    "name": "use_records",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {"records": {"type": "array", "items": {
-            "type": "object", "properties": _RECORD_PROPERTIES,
-            "required": list(_RECORD_PROPERTIES), "additionalProperties": False}}},
-        "required": ["records"],
-        "additionalProperties": False,
-    },
-}
+def _records_format(properties: dict) -> dict:
+    return {
+        "type": "json_schema",
+        "name": "use_records",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"records": {"type": "array", "items": {
+                "type": "object", "properties": properties,
+                "required": list(properties), "additionalProperties": False}}},
+            "required": ["records"],
+            "additionalProperties": False,
+        },
+    }
+
+
+USE_RECORDS_FORMAT = _records_format(_RECORD_PROPERTIES)
+# The off-catalog pass names each weed itself, so it also gives the scientific name that ties it to the agent's name.
+EXTRA_RECORDS_FORMAT = _records_format({**_RECORD_PROPERTIES, "scientific_name": _nullable("string")})
 
 EXTRACT_PROMPT = """You are reading the EPA-registered label for {product} (EPA Reg. No. {reg_no}).
 Extract one record per weed for in-crop postemergence uses on {crop} only (for corn: field corn). When the {crop} \
@@ -60,6 +66,26 @@ directions refer to a table of weeds controlled elsewhere in the label, take the
 species_id must be one of these ids; map label weed names to them and skip weeds that do not map:
 {species}
 Skip weeds the label rates only as partially controlled or suppressed by this product used alone.
+For each record give: the maximum weed height in inches the label allows (null if none); crop stage limits such as \
+V2 or V8 (null if none); the rate range and unit as printed; the pre-harvest interval in days; the restricted-entry \
+interval in hours; the herbicide group number(s) printed on the label.
+page is the 1-based page index within this PDF file where the record's facts appear. quote is a verbatim snippet \
+of 15 to 200 characters copied from that page that supports the record. Copy the quote character for character \
+from one place on the page: no paraphrase, no ellipses.
+Return only records the label clearly supports."""
+
+# The same task for the weeds the catalog lacks, so a weed the agent names off the catalog (burcucumber, wild
+# buckwheat) still finds its products.
+EXTRA_PROMPT = """You are reading the EPA-registered label for {product} (EPA Reg. No. {reg_no}).
+Extract one record per weed for in-crop postemergence uses on {crop} only (for corn: field corn), for every weed \
+the label names that is NOT one of these:
+{species}
+When the {crop} directions refer to a table of weeds controlled elsewhere in the label, take the weeds from that table.
+species_id is the weed's common name in lower case, singular, in plain word order: the label's "Pigweed, smooth" is \
+"smooth pigweed". scientific_name is its binomial as the label prints it, or the accepted binomial when the label \
+prints none (null if you are unsure).
+Skip weeds the label rates only as partially controlled or suppressed by this product used alone, and entries that \
+name no species, such as "annual grasses" or "broadleaf weeds".
 For each record give: the maximum weed height in inches the label allows (null if none); crop stage limits such as \
 V2 or V8 (null if none); the rate range and unit as printed; the pre-harvest interval in days; the restricted-entry \
 interval in hours; the herbicide group number(s) printed on the label.
@@ -103,19 +129,45 @@ def verify(records: list[UseRecord], texts: list[str]) -> tuple[list[UseRecord],
     return kept, dropped
 
 
-def extract_use_records(pdf_path: Path, facts: ProductFacts, llm, weeds: WeedBook) -> list[UseRecord]:
-    species = [sid for sid in weeds.ids() if not sid.startswith("unidentified")]
+def _off_catalog_id(item: dict, catalog: WeedBook, found: WeedBook) -> str | None:
+    """The id for a weed the off-catalog pass returned, or None for a catalog weed (the main pass covers those), a
+    group name such as "annual grasses", or a name that can't be a weed's. `found` collects this product's weeds,
+    so "bur cucumber" and "burcucumber" share one id."""
+    name, scientific = item["species_id"], item.get("scientific_name") or ""
+    if catalog.exact(scientific) or catalog.exact(name) or catalog.resolve(name) or is_generic(name):
+        return None
+    try:
+        return found.register(name, scientific)
+    except ValueError:
+        return None
+
+
+def extract_use_records(pdf_path: Path, facts: ProductFacts, llm, weeds: WeedBook,
+                        off_catalog: bool = False) -> list[UseRecord]:
+    """Records for the catalog's weeds, or with off_catalog, for every other weed the label names."""
+    species = [sid for sid in weeds.catalog_ids() if not sid.startswith("unidentified")]
     listing = "\n".join(f"- {sid}: {', '.join([weeds.get(sid).common_name, *weeds.get(sid).synonyms])}"
                         for sid in species)
     file = (Path(pdf_path).name, pdf_data_url(pdf_path))
     crops = [crop for crop, pattern in SITE_PATTERN.items()
              if not facts.sites or any(pattern.search(s.upper()) for s in facts.sites)]
+    prompt_text, text_format = (EXTRA_PROMPT, EXTRA_RECORDS_FORMAT) if off_catalog else (EXTRACT_PROMPT,
+                                                                                         USE_RECORDS_FORMAT)
+    found = WeedBook({})
     records = []
     for crop in crops:  # one smaller answer per crop: a single answer for a glyphosate label can run past the timeout
-        prompt = EXTRACT_PROMPT.format(product=facts.product_name, reg_no=facts.reg_no, species=listing, crop=crop)
-        turn = llm.turn([user_message(prompt, file=file)], text_format=USE_RECORDS_FORMAT)
+        prompt = prompt_text.format(product=facts.product_name, reg_no=facts.reg_no, species=listing, crop=crop)
+        turn = llm.turn([user_message(prompt, file=file)], text_format=text_format)
         for item in json.loads(turn.text)["records"]:
-            sid = item["species_id"] if item["species_id"] in weeds else weeds.resolve(item["species_id"])
+            if off_catalog:
+                sid = _off_catalog_id(item, weeds, found)
+                if sid is not None:
+                    item = {**item, "scientific_name": found.get(sid).scientific_name or None}
+            else:
+                item.pop("scientific_name", None)
+                sid = item["species_id"] if item["species_id"] in weeds else weeds.resolve(item["species_id"])
+                if sid is not None and not weeds.get(sid).catalog:
+                    sid = None  # the catalog pass keeps catalog weeds; the off-catalog pass finds the rest
             if sid is None or sid.startswith("unidentified") or item.get("crop") != crop:
                 continue
             groups = sorted({d for g in item["herbicide_groups"] for d in re.findall(r"\d+", g)})

@@ -146,3 +146,13 @@ def test_a_thought_without_narration_does_not_repeat_its_first_line():
     report.stops[0].steps = [AgentStep(t_ms=1, tool="think", summary="Counting weeds", detail=["Counting weeds", "Boxing rows"])]
     html = _html(report)
     assert html.count("Counting weeds") == 1 and "Boxing rows" in html
+
+
+def test_a_weed_named_at_run_time_shows_its_saved_name():
+    report = _report()
+    summary = report.species_summary[0].model_copy(update={"species_id": "bur_cucumber",
+                                                           "common_name": "bur cucumber"})
+    html = _html(report.model_copy(update={"species_summary": [summary]}))
+    assert "<td>bur cucumber</td>" in html
+    older = report.species_summary[0].model_copy(update={"species_id": "wild_buckwheat", "common_name": None})
+    assert "<td>wild buckwheat</td>" in _html(report.model_copy(update={"species_summary": [older]}))

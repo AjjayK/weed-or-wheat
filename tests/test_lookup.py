@@ -1,4 +1,4 @@
-from scout.labels.lookup import find_label_options, load_records, stage_index
+from scout.labels.lookup import adopt_label_species, find_label_options, load_records, stage_index
 from scout.models import UseRecord
 
 
@@ -48,3 +48,18 @@ def test_over_size_kept_last_and_groups_diversified():
 
 def test_load_records_missing_file(tmp_path):
     assert load_records(tmp_path / "none.json") == []
+
+
+def test_label_weeds_off_the_catalog_join_the_book_under_one_id():
+    from scout.agronomy.weeds import WeedBook
+    book = WeedBook.load()
+    records = [_r("1", ["27"], species="burcucumber", crop="corn"), _r("2", ["2"], species="bur_cucumber", crop="corn"),
+               _r("3", ["5"], species="waterhemp"), _r("4", ["4"], species="weed_9", crop="corn")]
+    records[0] = records[0].model_copy(update={"scientific_name": "Sicyos angulatus"})
+    adopted = adopt_label_species(records, book)
+    assert [r.species_id for r in adopted] == ["burcucumber", "burcucumber", "waterhemp"]  # weed_9 can't be a name
+    assert book.get("burcucumber").scientific_name == "Sicyos angulatus" and not book.get("burcucumber").catalog
+    # the agent's own spelling, or the scientific name alone, finds the label's records
+    for name, scientific in (("bur cucumber", None), ("vine", "Sicyos angulatus")):
+        sid = book.identify(name, scientific)
+        assert [o.record.reg_no for o in find_label_options(adopted, "corn", sid, None, None)] == ["1", "2"]

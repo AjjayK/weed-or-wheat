@@ -7,7 +7,7 @@ const TOO_MUCH = "The photos total over 30 MB. Pick fewer photos for this walk."
 const FOLLOW_HOLD_MS = 6000; // the live view stays on one photo until it has been quiet this long
 const PHASES = [["survey", "Survey"], ["crop", "Crop"], ["weeds", "Weeds"], ["check", "Check the picture"],
                 ["zoom", "Zoom"], ["name", "Name the weeds"], ["measure", "Measure"]];
-const TOOL_STEPS = new Set(["survey", "segment", "mark", "zoom", "classify", "measure", "finish"]);
+const TOOL_STEPS = new Set(["survey", "segment", "mark", "zoom", "identify", "classify", "measure", "finish"]);
 const WALK_ID = /^[0-9a-f]{16}$/;
 
 function el(tag, className, text) {
@@ -209,6 +209,7 @@ function phaseOf(stop, event) {
       return weedsDone ? "check" : "weeds";
     case "segment": return summary.includes('"crop row"') ? "crop" : (weedsDone ? "check" : "weeds");
     case "zoom": return "zoom";
+    case "identify":
     case "classify": return "name";
     case "measure": return "measure";
     default: return null;
@@ -360,7 +361,9 @@ function handle(event) {
       applyStep(stop, event);
       if (event.picture) {
         stop.picture = event.picture;
-        stop.caption = event.tool === "zoom" ? "Close-up" : "What is marked now: green crop, magenta weeds, blue weed areas";
+        stop.caption = event.tool === "zoom" ? "Close-up"
+          : event.tool === "identify" ? "Close-up for naming the weeds"
+          : "What is marked now: green crop, magenta weeds, blue weed areas";
       }
       touch(stop);
       break;

@@ -136,3 +136,36 @@ def test_reasoning_summaries_are_asked_for_and_read():
 def test_reasoning_without_summaries_is_empty():
     turn = Llm(lambda **k: _response([NS(type="reasoning")]), "m").turn("x")
     assert turn.reasoning == []
+
+
+def _capture():
+    seen = {}
+
+    def create(**kwargs):
+        seen.update(kwargs)
+        return _response([])
+    return seen, create
+
+
+def test_effort_is_sent_with_every_call_and_merges_with_the_summary():
+    seen, create = _capture()
+    Llm(create, "m", effort="max").turn("x", reasoning_summary=True)
+    assert seen["reasoning"] == {"effort": "max", "summary": "auto"}
+    seen.clear()
+    Llm(create, "m", effort="max").turn("x")
+    assert seen["reasoning"] == {"effort": "max"}
+
+
+def test_no_effort_leaves_the_api_default():
+    seen, create = _capture()
+    Llm(create, "m").turn("x")
+    assert "reasoning" not in seen
+    Llm(create, "m").turn("x", reasoning_summary=True)
+    assert seen["reasoning"] == {"summary": "auto"}
+
+
+def test_from_settings_takes_the_effort(monkeypatch):
+    from scout.config import Settings
+    llm = Llm.from_settings(Settings(api_key="k", agent_effort="xhigh"))
+    assert llm.effort == "xhigh" and llm.model == "muse-spark-1.3"
+    assert Llm.from_settings(Settings(api_key="k", agent_effort="")).effort is None

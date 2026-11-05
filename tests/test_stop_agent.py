@@ -262,10 +262,24 @@ def test_measure_and_finish_run_last_whatever_order_the_model_lists_them():
 
 def test_time_limit_closes_the_stop_after_the_turn_in_progress():
     ticks = itertools.count(0, 200)  # every clock reading is 200 s later: the 360 s budget is gone after one turn
-    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""), LlmTurn("r2", [_classify("s0-i3", "s0-i4")], "")])
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", [MARK_CROP], "")])
     result, _ = _run(llm, clock=lambda: float(next(ticks)))
-    assert len(llm.requests) == 1 and result.status == "ok"
+    assert len(llm.requests) == 1 and result.status == "ok"  # no weed waits to be classified: no last turn
     assert result.steps[-1].tool == "limit" and result.steps[-1].ok is False
+
+
+def test_time_up_with_weeds_unclassified_gives_one_last_turn_to_classify():
+    ticks = itertools.count(0, 200)
+    llm = FakeLlm([LlmTurn("r1", [MARK_CROP, MARK_WEEDS], ""), LlmTurn("r2", [_classify("s0-i3", "s0-i4")], ""),
+                   LlmTurn("r3", [MARK_WEEDS], "")])
+    result, state = _run(llm, clock=lambda: float(next(ticks)))
+    assert len(llm.requests) == 2  # the last turn, then the stop closes
+    last = [part.get("text", "") for item in llm.requests[1]["input"] if item.get("role") == "user"
+            for part in item["content"]]
+    assert last[-1].startswith("Time is up. In this turn, classify every weed")
+    assert [s.summary for s in result.steps if s.tool == "limit"] == [
+        "Time is up; one last turn to classify the weeds", "Tool-call or time limit reached; closing the stop"]
+    assert not any("never classified" in flag for flag in result.flags) and result.weed_count == 2
 
 
 def test_the_stop_gives_the_tools_its_time_budget():
@@ -412,7 +426,7 @@ def test_instructions_guard_against_over_marking_and_keep_calls_for_the_end():
     assert "call survey again" in corn  # the stored estimate is what marks are checked against
     assert f"up to {MAX_MARK_BOXES} per mark call" in corn
     assert "seconds you have left" in corn and "tool calls and seconds" in corn
-    assert "keep your last 4" in corn and "together in one turn" in corn and "even if it is not corn" in corn
+    assert "keep your last 5" in corn and "call identify in a turn of its own" in corn and "together in one turn" in corn and "even if it is not corn" in corn
     assert 'classify it as role "crop" or "ignore"' in corn and "Don't also box plants inside a weed area" in corn
     assert "never the far field" in corn and "at most about a third of the photo" in corn
     alfalfa = stop_instructions("alfalfa", ["dandelion"], 30)
@@ -457,3 +471,40 @@ def test_a_long_narration_is_capped_in_the_think_summary():
     reasoning_only = FakeLlm([LlmTurn("r1", [MARK_CROP], "", [], ["y" * 500]), LlmTurn("r2", _close("top_down"), "")])
     result, _ = _run(reasoning_only)
     assert result.steps[0].summary == "y" * 300 and result.steps[0].detail == []  # line 1 is the thought, not repeated
+
+
+class SlowLlm(FakeLlm):
+    """Every turn takes `seconds` on the shared clock."""
+
+    def __init__(self, turns, now, seconds):
+        super().__init__(turns)
+        self.now, self.seconds = now, seconds
+
+    def turn(self, input, **kwargs):
+        self.now[0] += self.seconds
+        return super().turn(input, **kwargs)
+
+
+def test_little_time_left_asks_the_agent_to_wrap_up_once():
+    now = [0.0]
+    llm = SlowLlm([LlmTurn("r1", [MARK_CROP], ""), LlmTurn("r2", [MARK_WEEDS], ""),
+                   LlmTurn("r3", [_classify("s0-i3", "s0-i4"), *_close()], "")], now, 300)
+    settings = replace(SETTINGS, stop_timeout_s=1000, wrap_up_s=500)  # 700 s left after turn 1, 400 s after turn 2
+    result, state = _run(llm, settings=settings, clock=lambda: now[0])
+    texts = [[part.get("text", "") for item in request["input"] if item.get("role") == "user"
+              for part in item["content"]] for request in llm.requests]
+    hurry = [n for n, request in enumerate(texts) for t in request if t.startswith("Time is nearly up")]
+    assert hurry == [2]  # sent with turn 2's answers, once
+    assert "(400 s left)" in texts[2][-1] and "identify (if you haven't yet" in texts[2][-1] and "then measure and finish" in texts[2][-1]
+    assert state.finished and [s.summary for s in result.steps if s.tool == "limit"] == [
+        "400 s left; asked the agent to wrap up"]
+
+
+def test_the_agent_sees_the_weeds_the_book_knows_and_may_name_others():
+    book = small_weedbook()
+    book.register("burcucumber", "Sicyos angulatus")
+    llm = FakeLlm([LlmTurn("r1", [], ""), LlmTurn("r2", [], "")])
+    run_stop(make_image(100, 100), "corn", llm, FakeSam(), book, SETTINGS)
+    instructions = llm.requests[0]["instructions"]
+    assert "burcucumber" in instructions and "its own common name" in instructions
+    assert "never force it onto" in instructions

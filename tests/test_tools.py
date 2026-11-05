@@ -29,8 +29,9 @@ def _mark(runner, kind, *boxes):
     return json.loads(runner.run("mark", {"kind": kind, "boxes": items}).output)
 
 
-def test_schemas_name_seven_tools():
-    assert [t["name"] for t in TOOL_SCHEMAS] == ["survey", "segment", "mark", "zoom", "classify", "measure", "finish"]
+def test_schemas_name_eight_tools():
+    assert [t["name"] for t in TOOL_SCHEMAS] == ["survey", "segment", "mark", "zoom", "identify", "classify", "measure",
+                                                 "finish"]
     schemas = {t["name"]: t["parameters"] for t in TOOL_SCHEMAS}
     assert schemas["mark"]["properties"]["boxes"]["maxItems"] == 120
     mark = next(t["description"] for t in TOOL_SCHEMAS if t["name"] == "mark")
@@ -95,7 +96,7 @@ def test_a_full_mark_call_makes_the_count_a_floor():
     assert metrics["weed_count"] == 1 and metrics["count_approximate"] is True
 
 
-def test_classify_resolves_synonyms_and_rejects_unknown():
+def test_classify_resolves_synonyms_and_rejects_names_that_are_no_weed():
     runner, state = _runner()
     _mark(runner, "weed", WEED_A, WEED_B)
     ok = runner.run("classify", {"items": [{"instance_id": "s0-i2", "role": "weed", "species_id": "Marestail",
@@ -103,9 +104,53 @@ def test_classify_resolves_synonyms_and_rejects_unknown():
     assert json.loads(ok.output) == {"ok": ["s0-i2"]}
     inst = state.instances["s0-i2"]
     assert inst.species_id == "horseweed" and inst.check_this is True
-    bad = runner.run("classify", {"items": [{"instance_id": "s0-i1", "role": "weed", "species_id": "dragonweed",
-                                             "id_confidence": "high"}]})
-    assert bad.output.startswith("error:") and state.instances["s0-i1"].id_confidence is None
+    for name in ("x9 weed", "soybean", "a b c d e f g"):
+        bad = runner.run("classify", {"items": [{"instance_id": "s0-i1", "role": "weed", "species_id": name,
+                                                 "id_confidence": "high"}]})
+        assert bad.output.startswith("error:") and state.instances["s0-i1"].id_confidence is None
+
+
+def test_classify_names_a_weed_off_the_list_instead_of_forcing_a_wrong_one():
+    runner, state = _runner()
+    _mark(runner, "weed", WEED_A, WEED_B, EDGE)
+    runner.run("classify", {"items": [
+        _verdict("s0-i1", species="Burcucumber", scientific_name="Sicyos angulatus", weed_type="broadleaf",
+                 confidence="high"),
+        _verdict("s0-i2", species="bur cucumber"),  # the same weed, written another way: one species
+        _verdict("s0-i3", species="Setaria faberi")]})  # a scientific name finds the listed species
+    first, second, third = (state.instances[f"s0-i{n}"] for n in (1, 2, 3))
+    assert first.species_id == second.species_id == "burcucumber" and third.species_id == "giant_foxtail"
+    info = runner.weeds.get("burcucumber")
+    assert (info.common_name, info.scientific_name, info.type, info.catalog) == (
+        "burcucumber", "Sicyos angulatus", "broadleaf", False)
+    assert runner.state.steps[-1].summary == "Classified 3 plants (3 weeds)"
+
+
+def test_classify_a_scientific_name_wins_over_a_loose_common_name():
+    runner, state = _runner()
+    _mark(runner, "weed", WEED_A)
+    runner.run("classify", {"items": [_verdict("s0-i1", species="foxtail", scientific_name="Amaranthus tuberculatus")]})
+    assert state.instances["s0-i1"].species_id == "waterhemp"
+
+
+def test_classify_a_described_weed_is_unidentified_by_its_type():
+    runner, state = _runner()
+    _mark(runner, "weed", WEED_A, WEED_B, EDGE)
+    out = runner.run("classify", {"items": [
+        _verdict("s0-i1", species="small grass seedling", weed_type="grass"),
+        _verdict("s0-i2", weed_type="sedge"),
+        _verdict("s0-i3", species="unknown broadleaf weed")]})
+    assert json.loads(out.output) == {"ok": ["s0-i1", "s0-i2", "s0-i3"]}
+    assert [state.instances[f"s0-i{n}"].species_id for n in (1, 2, 3)] == [
+        "unidentified_grass", "unidentified_grass", "unidentified_broadleaf"]
+    bad = runner.run("classify", {"items": [_verdict("s0-i1", weed_type="tree")]})
+    assert bad.output.startswith("error:")
+
+
+def test_classify_schema_lets_the_agent_name_any_weed():
+    schema = next(t for t in TOOL_SCHEMAS if t["name"] == "classify")
+    item = schema["parameters"]["properties"]["items"]["items"]["properties"]
+    assert {"scientific_name", "weed_type"} <= set(item) and "common name" in item["species_id"]["description"]
 
 
 def _verdict(instance_id, role="weed", species=None, confidence="medium", **extra):

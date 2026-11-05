@@ -3,6 +3,7 @@ import json
 import re
 from pathlib import Path
 
+from scout.agronomy.weeds import WeedBook
 from scout.models import LabelOption, UseRecord
 
 DEFAULT_PATH = Path(__file__).with_name("use_records.json")
@@ -28,6 +29,25 @@ def load_records(path: Path = DEFAULT_PATH) -> list[UseRecord]:
     if not path.exists():
         return []
     return [UseRecord.model_validate(item) for item in json.loads(path.read_text(encoding="utf-8"))]
+
+
+def adopt_label_species(records: list[UseRecord], weeds: WeedBook) -> list[UseRecord]:
+    """Register in `weeds` every weed the labels name that it lacks, and key those records by the book's id.
+
+    The agent then sees these weeds in its species list, and a weed it names as "bur cucumber" or by its scientific
+    name finds the records one label keyed "burcucumber". A record whose name can't be a weed's is left out.
+    """
+    out = []
+    for record in records:
+        if record.species_id in weeds:
+            out.append(record)
+            continue
+        try:
+            sid = weeds.register(record.species_id.replace("_", " "), record.scientific_name or "")
+        except ValueError:
+            continue
+        out.append(record if sid == record.species_id else record.model_copy(update={"species_id": sid}))
+    return out
 
 
 def find_label_options(records: list[UseRecord], crop: str, species_id: str, weed_height_in: float | None,

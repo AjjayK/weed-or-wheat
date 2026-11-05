@@ -1,6 +1,9 @@
 """Build use_records.json from focus_products.csv.
 
-Usage: python -m scout.labels.build_labels [--only REG_NO ...]
+Usage: python -m scout.labels.build_labels [--only REG_NO ...] [--off-catalog]
+
+--off-catalog adds records for the weeds a label names that weeds.yaml lacks (burcucumber, wild buckwheat...),
+replacing only the earlier off-catalog records of the products it reads; the catalog records stay as they are.
 """
 import argparse
 import csv
@@ -15,6 +18,7 @@ from scout.labels.epa import download_pdf, epa_session, fetch_product
 from scout.labels.extract import extract_use_records, page_texts, verify
 
 HERE = Path(__file__).parent
+LABEL_TIMEOUT_S = 1200.0
 
 
 def read_products(path: Path) -> dict[str, dict[str, str]]:
@@ -35,17 +39,24 @@ def with_traits(records: list[dict], products: dict[str, dict[str, str]]) -> lis
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", nargs="*", default=None)
+    parser.add_argument("--off-catalog", action="store_true")
     args = parser.parse_args()
-    llm, weeds, session = Llm.from_settings(get_settings()), WeedBook.load(), epa_session()
+    # at max effort, reading a long label for one crop took over 300 s
+    llm, weeds, session = Llm.from_settings(get_settings(), timeout_s=LABEL_TIMEOUT_S), WeedBook.load(), epa_session()
     pdf_dir = HERE / "pdfs"
     pdf_dir.mkdir(exist_ok=True)
     out_path = HERE / "use_records.json"
     existing = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else []
     products = read_products(HERE / "focus_products.csv")
     reg_nos = [r for r in products if not args.only or r in args.only]
-    records = [r for r in existing if r["reg_no"] not in reg_nos]
+
+    def replaced(record: dict) -> bool:
+        """This run rewrites the record: its product is read, and it is of the kind this run extracts."""
+        return record["reg_no"] in reg_nos and (record["species_id"] not in weeds) == args.off_catalog
+
+    records = [r for r in existing if not replaced(r)]
     for reg_no in reg_nos:
-        previous = [r for r in existing if r["reg_no"] == reg_no]
+        previous = [r for r in existing if r["reg_no"] == reg_no and replaced(r)]
         try:
             facts = fetch_product(reg_no, session)
             if not facts.is_herbicide or not facts.latest_pdf:
@@ -54,7 +65,8 @@ def main() -> None:
             if "brand" in products[reg_no]:
                 facts = replace(facts, product_name=products[reg_no]["brand"])
             pdf = download_pdf(facts.latest_pdf, pdf_dir, session)
-            kept, dropped = verify(extract_use_records(pdf, facts, llm, weeds), page_texts(pdf))
+            kept, dropped = verify(extract_use_records(pdf, facts, llm, weeds, off_catalog=args.off_catalog),
+                                   page_texts(pdf))
             records += [r.model_dump() for r in kept]
             print(f"{reg_no} {facts.product_name}: kept {len(kept)}, dropped {len(dropped)}")
         except Exception as error:  # one bad product must not stop the batch, nor cost it its earlier records

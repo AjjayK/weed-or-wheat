@@ -32,7 +32,8 @@ def run_order(calls: list[ToolCall]) -> list[ToolCall]:
             return -1
         if call.name in ("mark", "segment") and call.arguments.get("kind") == "crop":
             return 0
-        return {"measure": 2, "finish": 3}.get(call.name, 1)
+        # identify after the turn's marks; classify after identify, so a weed it leaves unnamed gets the panel's name
+        return {"identify": 1.5, "classify": 1.7, "measure": 2, "finish": 3}.get(call.name, 1)
     return sorted(calls, key=rank)
 
 
@@ -62,7 +63,9 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
              clock: Callable[[], float] = time.monotonic,
              picture_sink: Callable[[Image.Image], str] | None = None) -> tuple[StopResult, StopState]:
     state = StopState(image, crop, on_step=on_step, clock=clock, picture_sink=picture_sink)
-    runner = ToolRunner(state, sam, weeds, max_calls=settings.max_tool_calls, time_limit_s=settings.stop_timeout_s)
+    runner = ToolRunner(state, sam, weeds, max_calls=settings.max_tool_calls, time_limit_s=settings.stop_timeout_s,
+                        llm=llm, id_samples=settings.id_samples, id_effort=settings.id_effort,
+                        id_timeout_s=settings.id_timeout_s)
     ask = dict(instructions=stop_instructions(crop, weeds.ids(), settings.max_tool_calls), tools=TOOL_SCHEMAS,
                reasoning_summary=True)
     pending: list[dict] = [user_message(f"Stop {image.index + 1}: one photo of a {crop} field. Boxes are 0 to 1000 "
@@ -72,11 +75,23 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
     previous = None
     stateless = False
     nudged = False
+    hurried = False
+    graced = False
     try:
         while not state.finished:
-            if state.calls >= settings.max_tool_calls or clock() - state.started > settings.stop_timeout_s:
-                state.log("limit", "Tool-call or time limit reached; closing the stop", ok=False)
-                break
+            out_of_calls = state.calls >= settings.max_tool_calls
+            if out_of_calls or clock() - state.started > settings.stop_timeout_s:
+                if out_of_calls or graced or not _unclassified(state):
+                    state.log("limit", "Tool-call or time limit reached; closing the stop", ok=False)
+                    break
+                # A thorough turn can end past the limit with the weeds named by identify but not classified:
+                # one last turn classifies them, instead of a report of unchecked plants.
+                graced = True
+                state.log("limit", "Time is up; one last turn to classify the weeds", ok=False)
+                last = user_message("Time is up. In this turn, classify every weed not classified yet (species_id "
+                                    "null for the weeds identify named), then measure and finish. No other tools.")
+                pending.append(last)
+                history.append(last)
             try:
                 turn = llm.turn(list(history) if stateless else pending, previous_response_id=previous, **ask)
             except BadRequest as error:
@@ -110,11 +125,24 @@ def run_stop(image: StopImage, crop: str, llm: Llm, sam, weeds: WeedBook, settin
                 if images:
                     pending.append(user_message("Pictures for your tool calls: " + "; ".join(c for c, _ in images),
                                                 [url for _, url in images]))
+            left = settings.stop_timeout_s - (clock() - state.started)
+            if not state.finished and not hurried and 0 < left < settings.wrap_up_s:  # past it, the last turn's note
+                # a turn at max effort can take a minute: without this, a thorough stop ends with nothing classified
+                hurried = True
+                state.log("limit", f"{max(round(left), 0)} s left; asked the agent to wrap up")
+                pending.append(user_message(
+                    f"Time is nearly up ({max(round(left), 0)} s left). Send everything in this one turn: identify "
+                    "(if you haven't yet: one group per kind, every instance of it listed), then classify every "
+                    "weed (species_id null for the weeds identify names), then measure and finish."))
             history += pending
         return finalize(state, sam), state
     except Exception as error:  # StopFailed, BadRequest, LlmError, timeouts, dropped connections: this stop only
         state.log("error", f"{type(error).__name__}: {error}", ok=False)
         return _failed(state), state
+
+
+def _unclassified(state: StopState) -> bool:
+    return any(inst.role == "weed" and inst.id_confidence is None for inst in state.instances.values())
 
 
 def _flag(inst: Instance) -> str:
@@ -126,12 +154,16 @@ def _flag(inst: Instance) -> str:
 
 
 def finalize(state: StopState, sam) -> StopResult:
-    """Weeds that were marked but never classified stay weeds, flagged; measurements are recomputed."""
+    """Weeds that were marked but never classified stay weeds, flagged, named by identify's panel when it voted on
+    their kind; measurements are recomputed."""
     if not state.instances and state.view_type is None:  # the agent got nowhere: its failure, not a stop without crop
         return _failed(state)
     for inst in state.instances.values():
         if inst.role == "weed" and inst.id_confidence is None:
             inst.check_this = True
+            panel = state.identified.get(inst.id)
+            if inst.species_id is None and panel and panel[0]:
+                inst.species_id = panel[0]  # time ran out after identify, before classify
     view = state.view_type or "row"
     if view in ("row", "wide"):
         state.ensure_sky(sam)

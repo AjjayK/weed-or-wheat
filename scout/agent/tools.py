@@ -5,6 +5,9 @@ import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
+from PIL import Image
+
+from scout.agent.identify import identify_kinds
 from scout.agent.state import (MAX_BOXES, MAX_MARK_BOXES, UNMARKED_SHARE, StopFailed, StopState, to_pixels,
                                to_thousandths)
 from scout.agronomy.weeds import WeedBook
@@ -22,8 +25,12 @@ KINDS = ("crop", "weed")
 MARK_KINDS = ("crop", "weed", "patch")
 CROPS_SEEN = ("corn", "soybean", "alfalfa", "other", "unsure")
 CONFIDENCES = ("high", "medium", "low")
-ZOOM_MAX_PX = 768
+WEED_TYPES = ("broadleaf", "grass", "sedge", "other")
+ZOOM_MAX_PX = 1024  # leaf margins, hairs and ligules decide a species; 768 px lost some of them
 MAX_LISTED = 100
+MAX_ID_GROUPS = 6  # kinds of weed named in one identify call
+MAX_ID_SAMPLES = 3  # plants of one kind
+CONTEXT_MARGIN = 1.0  # the wider view of a plant for identify: its box plus this share of it on every side
 SAM_WORKERS = 4  # SAM requests in flight per mark call
 MAX_ESTIMATE = 1000  # the survey's weed estimate is capped here
 OVERLAY_QUALITY = 80  # JPEG quality of the picture sent back after a mark
@@ -102,11 +109,27 @@ TOOL_SCHEMAS = [
         ["kind", "boxes"]),
     _fn("zoom", "Look closely at one instance or region. The close-up arrives in the next message.",
         {"instance_id": {"type": "string"}, "box": _BOX}, []),
+    _fn("identify", "Name the weeds: one group per kind of weed you marked, listing every instance of that kind. "
+        f"Close-ups of its {MAX_ID_SAMPLES} largest go to a panel of focused identifications that vote; the answer "
+        "gives the species, the votes, the other names given, and the features seen. A listed instance you then "
+        "classify with species_id null gets the panel's species.",
+        {"groups": {"type": "array", "minItems": 1, "maxItems": MAX_ID_GROUPS, "items": {
+            "type": "object",
+            "properties": {"instance_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                           "label": {"type": "string", "description": "This kind as you see it, in 2-4 words"}},
+            "required": ["instance_ids", "label"], "additionalProperties": False}}},
+        ["groups"]),
     _fn("classify", "Record your verdict on one or more instances. Batch them.",
         {"items": {"type": "array", "items": {"type": "object", "properties": {
             "instance_id": {"type": "string"},
             "role": {"type": "string", "enum": ["crop", "weed", "ignore"]},
-            "species_id": {"type": ["string", "null"]},
+            "species_id": {"type": ["string", "null"],
+                           "description": "An id from the species list when the weed is one of them; for any other "
+                                          "weed, its common name (e.g. \"wild buckwheat\"); null when you cannot "
+                                          "tell"},
+            "scientific_name": {"type": ["string", "null"],
+                                "description": "The weed's binomial, e.g. \"Polygonum convolvulus\"; null if unsure"},
+            "weed_type": {"type": ["string", "null"], "enum": [*WEED_TYPES, None]},
             "height_in": {"type": ["number", "null"]},
             "leaf_count": {"type": ["integer", "null"]},
             "id_confidence": {"type": "string", "enum": ["high", "medium", "low"]}},
@@ -132,12 +155,17 @@ class ToolResult:
 
 class ToolRunner:
     def __init__(self, state: StopState, sam, weeds: WeedBook, max_calls: int = 12,
-                 time_limit_s: float | None = None):
+                 time_limit_s: float | None = None, llm=None, id_samples: int = 5, id_effort: str | None = None,
+                 id_timeout_s: float | None = None):
         self.state = state
         self.sam = sam
         self.weeds = weeds
         self.max_calls = max_calls
         self.time_limit_s = time_limit_s
+        self.llm = llm  # for identify's panel; None leaves naming to the agent alone
+        self.id_samples = id_samples
+        self.id_effort = id_effort
+        self.id_timeout_s = id_timeout_s
 
     def run(self, name: str, args: dict) -> ToolResult:
         handler = getattr(self, f"_tool_{name}", None)
@@ -332,6 +360,56 @@ class ToolRunner:
                        picture=picture)
         return self._feedback({"found": found, "notes": notes}, kind, picture)
 
+    def _close_up(self, box, margin: float = 0.15) -> Image.Image:
+        """The full-size photo cut around a work-image box, with a margin (a share of the box) for context."""
+        left, top, right, bottom = mk.pad_box(box, margin, self.state.size)
+        scale = self.state.image.full.width / self.state.image.work.width
+        return self.state.image.full.crop(tuple(int(v * scale) for v in (left, top, right, bottom)))
+
+    def _tool_identify(self, groups: list[dict]) -> ToolResult:
+        if self.llm is None or self.id_samples < 1:
+            raise ValueError("identify is not available here: name the weeds in classify yourself")
+        if not isinstance(groups, list) or not 1 <= len(groups) <= MAX_ID_GROUPS:
+            raise ValueError(f"give 1 to {MAX_ID_GROUPS} groups, one per kind of weed")
+        kinds, ids, labels = [], [], []
+        for n, group in enumerate(groups, start=1):
+            members = group.get("instance_ids") if isinstance(group, dict) else None
+            if not isinstance(members, list) or not members:
+                raise ValueError(f"group {n}: list the instance_ids of this kind")
+            for iid in members:
+                if iid not in self.state.instances:
+                    raise ValueError(f"group {n}: unknown instance {iid}")
+            # The largest plants show the most of their features (the agent, asked to list them first, sometimes led
+            # with a sliver of crop leaf), each twice: its leaves up close, then the plant in its surroundings.
+            largest = sorted(members, key=lambda iid: -self.state.instances[iid].area_px)[:MAX_ID_SAMPLES]
+            kinds.append([view for iid in largest for view in (
+                self._close_up(self.state.instances[iid].box),
+                self._close_up(self.state.instances[iid].box, CONTEXT_MARGIN))])
+            ids.append(list(members))
+            labels.append(str(group.get("label") or f"group {n}").strip())
+        verdicts = identify_kinds(self.llm, self.state.crop, kinds, self.weeds, self.id_samples, self.id_effort,
+                                  timeout_s=self.id_timeout_s)
+        out, lines = [], []
+        for members, label, verdict in zip(ids, labels, verdicts):
+            if verdict is None:
+                out.append({"instance_ids": members, "error": "no identification answered: name it yourself"})
+                lines.append(f"{label}: no identification answered")
+                continue
+            name = (verdict.common_name or self.weeds.get(verdict.species_id).common_name) if verdict.species_id \
+                else "unidentified"
+            out.append({"instance_ids": members, "species_id": verdict.species_id, "common_name": verdict.common_name,
+                        "scientific_name": verdict.scientific_name, "weed_type": verdict.weed_type,
+                        "votes": f"{verdict.votes} of {verdict.answered}", "confidence": verdict.confidence,
+                        "other_names": verdict.others, "features": verdict.features})
+            for iid in members:
+                self.state.identified[iid] = (verdict.species_id, verdict.confidence)
+            others = f"; also {', '.join(verdict.others)}" if verdict.others else ""
+            lines.append(f"{label}: {name}, {verdict.votes} of {verdict.answered} votes{others}")
+        # one step per call, so people watching count it as one tool call; the first kind's close-up shows
+        self.state.log("identify", " | ".join(lines), [i for members in ids for i in members],
+                       ok=any(v is not None for v in verdicts), picture=kinds[0][0])
+        return ToolResult(json.dumps({"identified": out}))
+
     def _tool_zoom(self, instance_id: str | None = None, box: list[int] | None = None) -> ToolResult:
         if instance_id:
             if instance_id not in self.state.instances:
@@ -344,8 +422,7 @@ class ToolRunner:
         left, top, right, bottom = mk.pad_box(region, 0.15, self.state.size)
         if right - left < 2 or bottom - top < 2:
             raise ValueError("region is too small to zoom")
-        scale = self.state.image.full.width / self.state.image.work.width
-        crop = self.state.image.full.crop(tuple(int(v * scale) for v in (left, top, right, bottom)))
+        crop = self._close_up(region)
         crop.thumbnail((ZOOM_MAX_PX, ZOOM_MAX_PX))
         self.state.log("zoom", f"Zoom on {label}", [instance_id] if instance_id else [], picture=crop)
         return ToolResult(f"The close-up of {label} follows in the next message.",
@@ -361,14 +438,22 @@ class ToolRunner:
             if role not in ("crop", "weed", "ignore"):
                 raise ValueError(f"bad role {role}")
             species = None
-            named = item.get("species_id")
-            if role == "weed" and named not in (None, ""):  # a crop's name is not a weed species: ignore it
-                species = named if named in self.weeds else self.weeds.resolve(named)
-                if species is None:
-                    raise ValueError(f"unknown species_id {named}; use an id from the allowed list or null")
+            named, scientific, kind = item.get("species_id"), item.get("scientific_name"), item.get("weed_type")
+            if kind is not None and kind not in WEED_TYPES:
+                raise ValueError(f"weed_type must be one of {list(WEED_TYPES)} or null")
+            # a crop's name is not a weed species: ignore it. Any weed name is accepted: one the book doesn't know
+            # is registered under its own name, so a weed off the list is never forced onto a wrong species.
+            if role == "weed" and (named or scientific or kind):
+                species = self.weeds.identify(named, scientific, kind)
+            panel = self.state.identified.get(inst.id)  # (species, confidence) from identify, if it saw this kind
+            if role == "weed" and not named and not scientific and panel and panel[0]:
+                species = panel[0]  # no name of its own: identify's verdict stands
             confidence = item["id_confidence"]
             if confidence not in CONFIDENCES:
                 raise ValueError(f"id_confidence must be one of {list(CONFIDENCES)}")
+            if role == "weed" and panel and species == panel[0] and CONFIDENCES.index(panel[1]) > \
+                    CONFIDENCES.index(confidence):
+                confidence = panel[1]  # a name from a split panel is no surer than the panel: the report flags it
             height = _number(item.get("height_in"), "height_in")
             leaves = _number(item.get("leaf_count"), "leaf_count")
             resolved.append((inst, role, species, confidence, height, None if leaves is None else int(leaves)))

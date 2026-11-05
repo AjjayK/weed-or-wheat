@@ -67,6 +67,9 @@ class StopResult(BaseModel):
 
 class SpeciesSummary(BaseModel):
     species_id: str
+    # Saved with the report: a weed named at run time is not in the catalog when the report is opened again.
+    common_name: str | None = None
+    scientific_name: str | None = None
     stops_present: int
     frequency: float
     mean_cover_pct: float
@@ -82,6 +85,7 @@ class UseRecord(BaseModel):
     herbicide_groups: list[str]
     crop: Crop
     species_id: str
+    scientific_name: str | None = None  # given for weeds off the catalog, to match the name the agent gives
     weed_label_text: str
     timing: Literal["preemergence", "postemergence", "burndown"]
     max_weed_height_in: float | None = None

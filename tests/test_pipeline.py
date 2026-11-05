@@ -327,3 +327,23 @@ def test_unreadable_saved_events_count_as_none(tmp_path):
     (folder / "report.json").write_text(report.model_dump_json())
     (folder / "events.json").write_text('[{"type": "walk_st')
     assert pipeline.saved_events("0123456789abcdef") is None
+
+
+def test_weeds_a_walk_names_stay_in_that_walk(tmp_path):
+    books = []
+
+    def naming_runner(image, crop, llm, sam, weeds, settings, on_step=None, picture_sink=None):
+        sid = weeds.identify("burcucumber", "Sicyos angulatus", "broadleaf")
+        books.append(weeds)
+        state = StopState(image, crop, on_step=on_step, picture_sink=picture_sink)
+        return StopResult(stop_index=image.index, image_hash=image.hash, species={sid: 1},
+                          species_cover_pct={sid: 6.0}, weed_cover_pct=6.0, weed_count=1), state
+
+    pipeline = _pipeline(tmp_path, naming_runner)
+    images = [make_image(index=0), make_image(index=1, color=(80, 150, 60))]
+    walk = Walk(id=walk_id_for("corn", images), crop="corn")
+    pipeline.run(walk, images)
+    assert walk.status == "done" and books[0] is books[1] and books[0] is not pipeline.weeds
+    assert "burcucumber" not in pipeline.weeds
+    summary = walk.report.species_summary[0]
+    assert (summary.species_id, summary.common_name, summary.outcome) == ("burcucumber", "burcucumber", "treat")

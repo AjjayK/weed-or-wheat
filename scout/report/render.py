@@ -31,7 +31,8 @@ def report_html(report: FieldReport, weeds: WeedBook, overlay_url: Callable[[int
     ok = [s for s in report.stops if s.status == "ok"]
     measured = [s for s in ok if s.view_type != "close_up"] or ok  # the stops rules.py averages
     densities = [s.density_per_m2 for s in ok if s.density_per_m2 is not None]
-    names = {s.species_id: weeds.get(s.species_id).common_name if s.species_id in weeds else s.species_id
+    names = {s.species_id: s.common_name or (weeds.get(s.species_id).common_name if s.species_id in weeds
+                                             else s.species_id.replace("_", " "))
              for s in report.species_summary}
     return _ENV.get_template("report.html").render(
         report=report,

@@ -2,6 +2,8 @@
 
 from scout.agent.state import MAX_MARK_BOXES
 
+MAX_ZOOMS = 6  # zooms check the marks; naming a weed is identify's job
+
 
 def stop_instructions(crop: str, species_ids: list[str], max_calls: int) -> str:
     if crop == "alfalfa":
@@ -47,24 +49,37 @@ and seconds you have left. Compare the picture with the photo:
 (in your final classify call).
 If the picture shows no weed left unmarked, your estimate was high: call survey again with the corrected estimate, \
 then go on. "mostly crop" means that box was on crop and was dropped; "nothing found" means SAM found no plant \
-there. Zoom on doubtful instances (check_this is true) or on a region where small weeds may hide, up to 6; each \
-close-up arrives at your next turn. Two or three rounds of checking are usually enough; once nothing obvious is \
-missing, move on.
-3. classify every weed instance, weed areas included (give the dominant weed's species), in one call. Use a \
-species_id from this list only: {", ".join(species_ids)}. Use null when you cannot tell. Give leaf_count when you \
-can count the leaves. height_in is an estimate from visible size cues ({a} {crop} plant, a leaf, the row spacing): \
-use null when there is no cue. Use role "crop" for an instance that is really crop and "ignore" for soil, residue, \
-or shadow.
-4. measure with the view_type that fits: row (looking along rows), top_down (camera pointing straight down), \
+there. Zoom on doubtful instances (check_this is true) or on a region where small weeds may hide, up to \
+{MAX_ZOOMS}; each close-up arrives at your next turn. Two or three rounds of checking are usually enough; once \
+nothing obvious is missing, move on.
+3. identify, in one call once marking is done: one group per kind of weed you marked (plants that look alike are \
+one kind; a weed area counts as the kind that dominates it), listing every instance of that kind and nothing \
+else: a crop leaf in a group misleads the panel. A panel of focused identifications votes on each kind from \
+full-resolution close-ups of its 3 largest instances, which you don't have, and returns the species, its votes, \
+the other names given and the features it saw. Follow its verdict unless your own pictures clearly show a \
+different plant.
+4. classify every weed instance, weed areas included, in one call: give each the species_id identify returned for \
+its kind (or null: a weed identify listed then gets the panel's species). For a kind it could not name, name it \
+yourself from what you see, not from what is common in {crop}: for \
+a broadleaf, the leaf shape, lobes and margin, veins, hairs, leaf arrangement, stem, tendrils and growth habit; for \
+a grass, the ligule, collar and sheath hairs, leaf width, and whether the leaves are rolled or folded. species_id \
+is an id from this list when the weed is one of them: {", ".join(species_ids)}. A weed that is not on the list \
+gets its own common name as species_id, with its scientific_name: never force it onto a list name it doesn't \
+match, since a wrong name picks the wrong herbicide. Use null when you cannot tell, and give weed_type. Give \
+leaf_count when you can count the leaves. height_in is an estimate from visible size cues ({a} {crop} plant, a \
+leaf, the row spacing): use null when there is no cue. Use role "crop" for an instance that is really crop and \
+"ignore" for soil, residue, or shadow.
+5. measure with the view_type that fits: row (looking along rows), top_down (camera pointing straight down), \
 close_up (a few plants fill the frame), wide (field to the horizon). Then finish with the crop growth stage if \
 you can tell (for example V3), one sentence of notes, and all_weeds_marked: true only if every weed you can see is \
 marked (answer honestly; false only adds a caution to the report). When nothing more needs marking or zooming, \
-send classify, measure and finish together in one turn, in that order.
+call identify in a turn of its own, then send classify, measure and finish together in one turn, in that order. \
+If you see no weeds, skip identify and classify.
 
 Rules: never invent measurements; cover, counts and density come only from measure. Never box crop, soil or \
 residue as a weed, not even to reach your estimate. You have at most {max_calls} tool calls; use as many as \
-marking needs, but keep your last 4 for classify, measure and finish. Always respond with tool calls, not prose. \
-Every coordinate is 0 to 1000."""
+marking needs, but keep your last 5 for identify, classify, measure and finish. Always respond with tool calls, not \
+prose. Every coordinate is 0 to 1000."""
 
 
 FIELD_INSTRUCTIONS = """You are an agronomist writing the reasoning for a field scouting report. You receive JSON \

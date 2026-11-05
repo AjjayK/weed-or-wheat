@@ -8,6 +8,7 @@ Usage (from the repo root; PYTHONPATH=. is needed so the scout package is found)
       field-images/IMG_4219.JPG field-images/IMG_4220.JPG
 """
 import argparse
+import itertools
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -18,6 +19,7 @@ from scout.agent.stop_agent import run_stop
 from scout.agronomy.weeds import WeedBook
 from scout.app.ingest import load_image
 from scout.config import get_settings
+from scout.labels.lookup import adopt_label_species, load_records
 from scout.models import StopResult
 from scout.vision.sam_client import SamClient
 
@@ -41,20 +43,33 @@ def main() -> None:
     parser.add_argument("--crop", required=True, choices=["corn", "soybean", "alfalfa"])
     parser.add_argument("--out", default="run_out")
     parser.add_argument("--jobs", type=int, default=10)
+    parser.add_argument("--steps", action="store_true",
+                        help="save every step's picture (marks, zooms, identify's close-ups) to OUT/STEM-steps/")
     args = parser.parse_args()
     out = Path(args.out)
     out.mkdir(exist_ok=True)
     settings = get_settings()
     llm, sam, weeds = Llm.from_settings(settings), SamClient.from_settings(settings), WeedBook.load()
+    adopt_label_species(load_records(), weeds)  # the agent sees the labels' weeds, as in the web app
     started = time.monotonic()
 
     def one(photo: str):
         stem, began = Path(photo).stem, time.monotonic()
         try:
             image = load_image(0, Path(photo).read_bytes(), settings.full_max_px, settings.work_max_px)
+            sink = None
+            if args.steps:
+                folder, numbers = out / f"{stem}-steps", itertools.count()
+                folder.mkdir(exist_ok=True)
+
+                def sink(picture, folder=folder, numbers=numbers):
+                    name = f"{next(numbers):02d}.jpg"
+                    picture.convert("RGB").save(folder / name, quality=85)
+                    return name
             result, state = run_stop(
-                image, args.crop, llm, sam, weeds, settings,
-                on_step=lambda s, stem=stem: print(f"  [{stem}] {s.tool}: {s.summary}", flush=True))
+                image, args.crop, llm, sam, weeds, settings, picture_sink=sink,
+                on_step=lambda s, stem=stem: print(f"  [{stem}] {s.tool}: {s.summary}"
+                                                   + (f" ({s.picture})" if s.picture else ""), flush=True))
             state.overlay().save(out / f"{stem}.png")
             (out / f"{stem}.json").write_text(result.model_dump_json(indent=1), encoding="utf-8")
         except Exception as error:  # an unreadable photo or a dropped connection must not end the batch

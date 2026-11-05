@@ -44,24 +44,28 @@ def user_message(text: str, image_urls: Sequence[str] = (), file: tuple[str, str
 
 
 class Llm:
-    def __init__(self, create: Callable[..., Any], model: str, sleep: Callable[[float], None] = time.sleep):
+    def __init__(self, create: Callable[..., Any], model: str, sleep: Callable[[float], None] = time.sleep,
+                 effort: str | None = None):
         self._create = create
         self.model = model
         self._sleep = sleep
+        self.effort = effort  # reasoning effort for every call; None leaves the API's default (high)
 
     @classmethod
-    def from_settings(cls, settings) -> "Llm":
+    def from_settings(cls, settings, timeout_s: float = 300.0) -> "Llm":
         import httpx
         from openai import OpenAI
 
         # max_retries=0 leaves with_retry as the only retry layer; connect=5 fails fast on an unreachable host.
+        # 300 s: a turn at max effort with several pictures can think for well over a minute.
         client = OpenAI(base_url=settings.base_url, api_key=settings.api_key,
-                        timeout=httpx.Timeout(180.0, connect=5.0), max_retries=0)
-        return cls(client.responses.create, settings.agent_model)
+                        timeout=httpx.Timeout(timeout_s, connect=5.0), max_retries=0)
+        return cls(client.responses.create, settings.agent_model, effort=settings.agent_effort or None)
 
     def turn(self, input, instructions: str | None = None, tools: list[dict] | None = None,
              previous_response_id: str | None = None, text_format: dict | None = None,
-             reasoning_summary: bool = False) -> LlmTurn:
+             reasoning_summary: bool = False, effort: str | None = None) -> LlmTurn:
+        """effort overrides this client's reasoning effort for one call."""
         kwargs: dict[str, Any] = {"model": self.model, "input": input}
         if instructions:
             kwargs["instructions"] = instructions
@@ -71,8 +75,13 @@ class Llm:
             kwargs["previous_response_id"] = previous_response_id
         if text_format:
             kwargs["text"] = {"format": text_format}
+        reasoning: dict[str, str] = {}
+        if effort or self.effort:
+            reasoning["effort"] = effort or self.effort
         if reasoning_summary:  # readable lines of the model's thinking, shown to people watching the agent
-            kwargs["reasoning"] = {"summary": "auto"}
+            reasoning["summary"] = "auto"
+        if reasoning:
+            kwargs["reasoning"] = reasoning
         response = with_retry(lambda: self._create(**kwargs), sleep=self._sleep)
         status = getattr(response, "status", None)
         if status in ("failed", "incomplete", "cancelled"):

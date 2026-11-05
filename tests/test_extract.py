@@ -121,3 +121,34 @@ def test_verify_picks_the_nearest_page_when_a_quote_repeats():
 def test_verify_drops_short_quotes():
     kept, dropped = verify([_record(1, "Cover")], ["Cover page"])
     assert kept == [] and len(dropped) == 1
+
+
+def test_off_catalog_pass_keeps_only_weeds_the_catalog_lacks(tmp_path):
+    from scout.labels.extract import EXTRA_RECORDS_FORMAT
+    pdf = tmp_path / "label.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    items = [_item(species_id="burcucumber", scientific_name="Sicyos angulatus"),
+             _item(species_id="bur cucumber", scientific_name=None),  # the same weed again: one id
+             _item(species_id="smooth pigweed", scientific_name="Amaranthus hybridus"),
+             _item(species_id="marestail", scientific_name=None),  # in the catalog: the main pass has it
+             _item(species_id="annual grasses", scientific_name=None),  # a group, not a species
+             _item(species_id="Pigweed, smooth 2", scientific_name=None)]  # not a name
+    llm = FakeLlm([LlmTurn("r1", [], json.dumps({"records": items}))])
+    records = extract_use_records(pdf, FACTS, llm, small_weedbook(), off_catalog=True)
+    assert [(r.species_id, r.scientific_name) for r in records] == [
+        ("burcucumber", "Sicyos angulatus"), ("burcucumber", "Sicyos angulatus"),
+        ("smooth_pigweed", "Amaranthus hybridus")]
+    request = llm.requests[0]
+    assert request["text_format"] == EXTRA_RECORDS_FORMAT
+    assert "NOT one of these" in _prompt(llm, 0) and "- waterhemp:" in _prompt(llm, 0)
+    assert "scientific_name" in EXTRA_RECORDS_FORMAT["schema"]["properties"]["records"]["items"]["required"]
+
+
+def test_catalog_pass_lists_only_catalog_weeds(tmp_path):
+    pdf = tmp_path / "label.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    book = small_weedbook()
+    book.register("burcucumber")
+    llm = FakeLlm([LlmTurn("r1", [], json.dumps({"records": [_item(species_id="burcucumber")]}))])
+    assert extract_use_records(pdf, FACTS, llm, book) == []  # a run-time weed is no catalog record
+    assert "burcucumber" not in _prompt(llm, 0)

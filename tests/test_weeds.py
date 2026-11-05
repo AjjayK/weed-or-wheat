@@ -82,3 +82,51 @@ def test_load_errors_name_the_species(tmp_path):
 def test_contains_ignores_non_strings():
     book = WeedBook.load()
     assert "waterhemp" in book and ["waterhemp"] not in book and None not in book
+
+
+def test_identify_maps_known_names_and_registers_others():
+    book = WeedBook.load()
+    assert book.identify("waterhemp") == "waterhemp"  # an id
+    assert book.identify("Marestail") == "horseweed"  # a synonym
+    assert book.identify("pigweed", "Amaranthus palmeri") == "palmer_amaranth"  # the scientific name decides
+    sid = book.identify("Wild Buckwheat (Polygonum convolvulus)", weed_type="broadleaf")
+    assert sid == "wild_buckwheat"
+    info = book.get(sid)
+    assert (info.common_name, info.scientific_name, info.type, info.catalog) == (
+        "wild buckwheat", "Polygonum convolvulus", "broadleaf", False)
+    assert info.action_density is None and info.action_cover_pct is None and not info.zero_tolerance
+    assert book.identify("wild buckwheats") == book.identify("wildbuckwheat") == sid  # plurals, spacing
+    assert book.identify("black bindweed", "Polygonum convolvulus") == sid  # the same plant by another name
+
+
+@pytest.mark.parametrize("phrase, weed_type, expected", [
+    ("small broadleaf seedling", None, "unidentified_broadleaf"),
+    ("unknown grass", "grass", "unidentified_grass"),
+    ("", "sedge", "unidentified_grass"),
+    (None, None, "unidentified_broadleaf"),
+])
+def test_identify_a_description_is_an_unidentified_weed(phrase, weed_type, expected):
+    assert WeedBook.load().identify(phrase, None, weed_type) == expected
+
+
+@pytest.mark.parametrize("phrase", ["soybean", "Corn", "x9 weed", "a b c d e f", "<script>"])
+def test_identify_refuses_names_that_are_no_weed(phrase):
+    with pytest.raises(ValueError):
+        WeedBook.load().identify(phrase)
+
+
+def test_copy_keeps_registered_weeds_out_of_the_original():
+    book = WeedBook.load()
+    walk = book.copy()
+    walk.register("burcucumber", "Sicyos angulatus")
+    assert "burcucumber" in walk and "burcucumber" not in book
+    assert "burcucumber" not in walk.catalog_ids() and "waterhemp" in walk.catalog_ids()
+    assert walk.validate() == []
+
+
+def test_register_returns_the_weed_already_known_by_that_name():
+    book = WeedBook.load()
+    first = book.register("Bur Cucumber", "Sicyos angulatus")
+    assert book.register("burcucumber") == book.register("x", "Sicyos angulatus") == first == "bur_cucumber"
+    assert book.get(first).common_name == "bur cucumber"
+    assert book.register("Canada thistle") == "canada_thistle"  # a catalog weed is never registered twice
